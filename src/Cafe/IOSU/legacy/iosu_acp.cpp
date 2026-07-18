@@ -16,6 +16,7 @@
 #include "Cafe/IOSU/legacy/iosu_act.h"
 #include "Cafe/CafeSystem.h"
 #include "config/ActiveSettings.h"
+#include "util/helpers/ThreadHelpers.h"
 
 #include <inttypes.h>
 
@@ -567,8 +568,7 @@ namespace iosu
 	{
 		if (iosuAcp.isInitialized)
 			return;
-		std::thread t(iosuAcp_thread);
-		t.detach();
+		cemuCreateDetachedThread(iosuAcp_thread);
 		iosuAcp.isInitialized = true;
 	}
 

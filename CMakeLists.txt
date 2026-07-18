@@ -149,6 +149,11 @@ option(ENABLE_CUBEB "Enabled cubeb backend" ON)
 
 option(ENABLE_WXWIDGETS "Build with wxWidgets UI (Currently required)" ON)
 
+if (PLATFORM_SWITCH)
+	# Switch uses devkitPro dependencies and bundled NVK.
+	include(${CMAKE_SOURCE_DIR}/cmake/switch/SwitchDependencies.cmake)
+else()
+
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 find_package(pugixml REQUIRED)
@@ -173,7 +178,9 @@ if (NOT TARGET glslang::SPIRV AND TARGET SPIRV)
 	add_library(glslang::SPIRV ALIAS SPIRV)
 endif()
 
-if (UNIX AND NOT APPLE)
+endif() # PLATFORM_SWITCH
+
+if (UNIX AND NOT APPLE AND NOT PLATFORM_SWITCH)
 	find_package(X11 REQUIRED)
 	if (ENABLE_WAYLAND)
 		find_package(Wayland REQUIRED Client)

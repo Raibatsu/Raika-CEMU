@@ -9,6 +9,9 @@
 #if HAS_CUBEB
 #include "CubebAPI.h"
 #endif
+#if defined(__SWITCH__)
+#include "SwitchAudioAPI.h"
+#endif
 
 std::shared_mutex g_audioMutex;
 AudioAPIPtr g_tvAudio;
@@ -87,6 +90,9 @@ void IAudioAPI::InitializeStatic()
 #if HAS_CUBEB
 	s_availableApis[Cubeb] = CubebAPI::InitializeStatic();
 #endif
+#if defined(__SWITCH__)
+	s_availableApis[SwitchAudio] = SwitchAudioAPI::InitializeStatic();
+#endif
 }
 
 bool IAudioAPI::IsAudioAPIAvailable(AudioAPI api)
@@ -127,7 +133,12 @@ AudioAPIPtr IAudioAPI::CreateDeviceFromConfig(AudioType type, sint32 rate, sint3
 	if (!device_description)
 		throw std::runtime_error("failed to find selected device while trying to create audio device");
 
-	audioAPIDev = CreateDevice(audio_api, device_description, rate, channels, samples_per_block, bits_per_sample);
+#if defined(__SWITCH__)
+	if (audio_api == SwitchAudio)
+		audioAPIDev = std::make_unique<SwitchAudioAPI>(rate, channels, samples_per_block, bits_per_sample, type);
+	else
+#endif
+		audioAPIDev = CreateDevice(audio_api, device_description, rate, channels, samples_per_block, bits_per_sample);
 	audioAPIDev->SetVolume(GetVolumeFromType(type));
 
 	return audioAPIDev;
@@ -164,6 +175,10 @@ AudioAPIPtr IAudioAPI::CreateDevice(AudioAPI api, const DeviceDescriptionPtr& de
 		return std::make_unique<CubebAPI>(tmp->GetDeviceId(), samplerate, channels, samples_per_block, bits_per_sample);
 	}
 #endif
+#if defined(__SWITCH__)
+	case SwitchAudio:
+		return std::make_unique<SwitchAudioAPI>(samplerate, channels, samples_per_block, bits_per_sample);
+#endif
 	default:
 		throw std::runtime_error(fmt::format("invalid audio api: {}", api));
 	}
@@ -195,6 +210,10 @@ std::vector<IAudioAPI::DeviceDescriptionPtr> IAudioAPI::GetDevices(AudioAPI api)
 	{
 		return CubebAPI::GetDevices();
 	}
+#endif
+#if defined(__SWITCH__)
+	case SwitchAudio:
+		return SwitchAudioAPI::GetDevices();
 #endif
 	default:
 		throw std::runtime_error(fmt::format("invalid audio api: {}", api));

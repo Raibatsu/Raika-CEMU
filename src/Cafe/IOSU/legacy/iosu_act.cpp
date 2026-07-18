@@ -11,6 +11,7 @@
 #include "Cafe/Account/Account.h"
 #include "config/ActiveSettings.h"
 #include "util/helpers/helpers.h"
+#include "util/helpers/ThreadHelpers.h"
 
 #include "Cemu/napi/napi.h"
 #include "Cemu/ncrypto/ncrypto.h"
@@ -870,8 +871,7 @@ void iosuAct_init_depr()
 {
 	if (iosuAct.isInitialized)
 		return;
-	std::thread t(iosuAct_thread);
-	t.detach();
+	cemuCreateDetachedThread(iosuAct_thread);
 	iosuAct.isInitialized = true;
 }
 

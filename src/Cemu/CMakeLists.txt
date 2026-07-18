@@ -52,3 +52,8 @@ target_link_libraries(CemuComponents PRIVATE
 
 # PUBLIC because fmt/format.h is included in ExpressionParser/ExpressionParser.h
 target_link_libraries(CemuComponents PUBLIC fmt::fmt)
+
+if(PLATFORM_SWITCH)
+	# ncrypto uses the mbedTLS-backed OpenSSL shim.
+	target_link_libraries(CemuComponents PRIVATE OpenSSL::SSL)
+endif()

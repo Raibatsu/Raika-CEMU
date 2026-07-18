@@ -146,7 +146,10 @@ bool InitializeDeviceVulkan(VkDevice device)
 
 void* dlopen_vulkan_loader()
 {
-#if BOOST_OS_LINUX || BOOST_OS_BSD
+#if defined(__SWITCH__)
+	// NVK is linked statically.
+	void* vulkan_so = reinterpret_cast<void*>(1);
+#elif BOOST_OS_LINUX || BOOST_OS_BSD
 	void* vulkan_so = dlopen("libvulkan.so", RTLD_NOW);
 	if(!vulkan_so)
 		vulkan_so = dlopen("libvulkan.so.1", RTLD_NOW);

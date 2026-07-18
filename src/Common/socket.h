@@ -8,10 +8,11 @@ typedef int socklen_t;
 
 #define GETLASTERR WSAGetLastError()
 
-#elif BOOST_OS_UNIX
+#elif BOOST_OS_UNIX || defined(__SWITCH__)
 
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <errno.h>

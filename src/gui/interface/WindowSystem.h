@@ -12,6 +12,7 @@ namespace WindowSystem
 			Wayland,
 			Cocoa,
 			Windows,
+			ViNN, // Nintendo Switch (libnx) nwindow/VI layer
 		} backend;
 		void* display = nullptr;
 		void* surface = nullptr;

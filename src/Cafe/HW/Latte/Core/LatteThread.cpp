@@ -18,6 +18,10 @@
 #include "config/ActiveSettings.h"
 
 #include "Cafe/CafeSystem.h"
+#if defined(__SWITCH__)
+#include "platform/switch/SwitchMemoryBudget.h"
+#include "platform/switch/SwitchPlatform.h"
+#endif
 
 LatteGPUState_t LatteGPUState = {};
 
@@ -125,7 +129,11 @@ int Latte_ThreadEntry()
 	LatteTiming_Init();
 	LatteTexture_init();
 	LatteTC_Init();
-	LatteBufferCache_init(164 * 1024 * 1024);
+	size_t bufferCacheSize = 164 * 1024 * 1024;
+#if defined(__SWITCH__)
+	bufferCacheSize = SwitchMemoryBudget_GetBufferCacheSize();
+#endif
+	LatteBufferCache_init(bufferCacheSize);
 	LatteQuery_Init();
 	LatteSHRC_Init();
 	LatteStreamout_InitCache();
@@ -194,6 +202,10 @@ int Latte_ThreadEntry()
 	}
 	// load disk shader cache
     LatteShaderCache_Load();
+#if defined(__SWITCH__)
+	// End FastLoad on the first submitted frame.
+	SwitchPlatform_ArmGameBootBoostHandoff();
+#endif
 	// init registers
 	Latte_LoadInitialRegisters();
 	// let CPU thread know the GPU is done initializing

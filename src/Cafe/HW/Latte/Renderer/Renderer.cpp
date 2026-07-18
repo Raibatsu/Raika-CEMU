@@ -9,6 +9,7 @@
 #include <png.h>
 
 #include "config/ActiveSettings.h"
+#include "util/helpers/ThreadHelpers.h"
 
 std::unique_ptr<Renderer> g_renderer;
 
@@ -124,7 +125,7 @@ void Renderer::CancelScreenshotRequest()
 
 void Renderer::SaveScreenshot(const std::vector<uint8>& rgb_data, int width, int height, bool mainWindow)
 {
-	std::thread(
+	cemuCreateDetachedThread(
 		[=, screenshotRequested = std::exchange(m_screenshot_requested, false), onSaveScreenshot = std::exchange(m_on_save_screenshot, {})]() {
 			if (screenshotRequested && onSaveScreenshot)
 			{
@@ -132,6 +133,5 @@ void Renderer::SaveScreenshot(const std::vector<uint8>& rgb_data, int width, int
 				if (notificationMessage.has_value())
 					LatteOverlay_pushNotification(notificationMessage.value(), 2500);
 			}
-		})
-		.detach();
+		});
 }

@@ -42,8 +42,14 @@ PRIVATE
     unix/platform.h
     unix/FileStream_unix.cpp
     unix/FileStream_unix.h
-    ExceptionHandler/ExceptionHandler_posix.cpp
 )
+if(PLATFORM_SWITCH)
+	target_sources(CemuCommon PRIVATE ExceptionHandler/ExceptionHandler_switch.cpp)
+	# Keep the libnx exception-stack override out of GCC LTO.
+	set_property(SOURCE ExceptionHandler/ExceptionHandler_switch.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-lto)
+else()
+	target_sources(CemuCommon PRIVATE ExceptionHandler/ExceptionHandler_posix.cpp)
+endif()
 endif()
 
 if(LINUX)
@@ -54,7 +60,12 @@ if(LINUX)
 endif()
 
 # CemuCommon always builts the precompiled header
-target_precompile_headers(CemuCommon PRIVATE precompiled.h)
+if(PLATFORM_SWITCH)
+	# devkitA64 cannot consume the MSYS paths in a generated PCH.
+	target_compile_options(CemuCommon PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/precompiled.h>")
+else()
+	target_precompile_headers(CemuCommon PRIVATE precompiled.h)
+endif()
 target_include_directories(CemuCommon PUBLIC "../")
 
 target_link_libraries(CemuCommon PRIVATE

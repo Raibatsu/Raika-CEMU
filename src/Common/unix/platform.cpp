@@ -13,6 +13,11 @@ uint32_t GetTickCount()
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (1000 * ts.tv_sec + ts.tv_nsec / 1000000);
+#elif defined(__SWITCH__)
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint32_t)(1000 * ts.tv_sec + ts.tv_nsec / 1000000);
+#else
+	return 0;
 #endif
-
 }

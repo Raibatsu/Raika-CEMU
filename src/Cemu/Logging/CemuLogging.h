@@ -72,7 +72,12 @@ inline uint64 cemuLog_getFlag(LogType type)
 
 inline bool cemuLog_isLoggingEnabled(LogType type)
 {
+#if defined(__SWITCH__)
+	(void)type;
+	return false;
+#else
 	return (s_loggingFlagMask & cemuLog_getFlag(type)) != 0;
+#endif
 }
 
 bool cemuLog_log(LogType type, std::string_view text);

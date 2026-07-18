@@ -363,7 +363,11 @@ inline void _mm_pause()
 inline uint64 __rdtsc()
 {
     uint64 t;
+#if defined(__SWITCH__)
+    asm volatile("mrs %0, cntpct_el0" : "=r" (t));
+#else
     asm volatile("mrs %0, cntvct_el0" : "=r" (t));
+#endif
     return t;
 }
 
@@ -375,12 +379,27 @@ inline void _mm_mfence()
 
 inline unsigned char _addcarry_u64(unsigned char carry, unsigned long long a, unsigned long long b, unsigned long long *result)
 {
-    *result = a + b + (unsigned long long)carry;
-    if (*result < a)
-        return 1;
-    return 0;
+    const unsigned long long partial = a + b;
+    const unsigned char carry1 = partial < a;
+    *result = partial + (unsigned long long)carry;
+    const unsigned char carry2 = *result < partial;
+    return carry1 | carry2;
 }
 
+inline unsigned char _BitScanReverse(unsigned int* Index, unsigned int Mask)
+{
+    if (Mask == 0)
+        return 0;
+    *Index = 31 - __builtin_clz(Mask);
+    return 1;
+}
+
+#endif
+
+#if defined(__SWITCH__)
+#include <strings.h>
+#define _strcmpi strcasecmp
+#define _stricmp strcasecmp
 #endif
 
 // asserts
@@ -488,6 +507,11 @@ bool match_any_of(T1&& value, Types&&... others)
 	const long long _Whole = (_Ctr / _Freq) * std::nano::den;
 	const long long _Part = (_Ctr % _Freq) * std::nano::den / _Freq;
 	return (std::chrono::high_resolution_clock::time_point(std::chrono::nanoseconds(_Whole + _Part)));
+#elif defined(__SWITCH__)
+	struct timespec tp;
+	clock_gettime(CLOCK_MONOTONIC, &tp);
+	return std::chrono::high_resolution_clock::time_point(
+		std::chrono::seconds(tp.tv_sec) + std::chrono::nanoseconds(tp.tv_nsec));
 #else
     return std::chrono::high_resolution_clock::now();
 #endif
@@ -512,6 +536,11 @@ bool match_any_of(T1&& value, Types&&... others)
 	return std::chrono::steady_clock::time_point(
 		std::chrono::nanoseconds(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)));
 #elif BOOST_OS_BSD
+	struct timespec tp;
+	clock_gettime(CLOCK_MONOTONIC, &tp);
+	return std::chrono::steady_clock::time_point(
+		std::chrono::seconds(tp.tv_sec) + std::chrono::nanoseconds(tp.tv_nsec));
+#elif defined(__SWITCH__)
 	struct timespec tp;
 	clock_gettime(CLOCK_MONOTONIC, &tp);
 	return std::chrono::steady_clock::time_point(

@@ -149,7 +149,7 @@ bool TitleInfo::ParseWuaTitleFolderName(std::string_view name, TitleId& titleIdO
 	if (!TitleIdParser::ParseFromStr(sv, parsedId))
 		return false;
 	sv.remove_prefix(16);
-	if (sv[0] != '_' || (sv[1] != 'v' && sv[1] != 'v'))
+	if (sv[0] != '_' || (sv[1] != 'v' && sv[1] != 'V'))
 		return false;
 	sv.remove_prefix(2);
 	if (sv.empty())

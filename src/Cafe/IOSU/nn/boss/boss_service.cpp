@@ -690,7 +690,7 @@ namespace iosu::boss
 			// if the file already exists locally, skip download
 			// but still add the entry to the FAD db
 			std::error_code ec;
-			if (fs::exists(dataFilePath))
+			if (fs::exists(dataFilePath, ec))
 			{
 				cemuLog_log(LogType::Force, "\t- {} (DataId:{:08x} {}KB) (Skipping, already downloaded)", nbdlFile.fileName, nbdlFile.dataId, (nbdlFile.size+1023)/1024);
 				TrackDownloadedNbdlFile(nbdlFile);
@@ -769,7 +769,7 @@ namespace iosu::boss
 			memcpy(fileHMAC, &((BossNbdlHeader*)receivedData.data())->encryptedHeader.uknHashData, 32);
 			// write decrypted data to filesystem using a temporary path
 			fs::path tmpDataPath = ActiveSettings::GetMlcPath("usr/boss/{:08x}/{:08x}/user/common/data/{}/.{:08x}", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF), m_taskId.id.c_str(), nbdlFile.dataId);
-			if (!fs::exists(tmpDataPath.parent_path()))
+			if (!fs::exists(tmpDataPath.parent_path(), ec))
 				fs::create_directories(tmpDataPath.parent_path(), ec);
 			FileStream* fs = FileStream::createFile2(tmpDataPath);
 			if (fs)

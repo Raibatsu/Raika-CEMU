@@ -218,6 +218,9 @@ public:
 	static VkSurfaceKHR CreateWaylandSurface(VkInstance instance, wl_display* display, wl_surface* surface);
 	#endif
 #endif
+#if defined(__SWITCH__)
+	static VkSurfaceKHR CreateViSurface(VkInstance instance, void* nativeWindow);
+#endif
 
 	static VkSurfaceKHR CreateFramebufferSurface(VkInstance instance, struct WindowSystem::WindowHandleInfo& windowInfo);
 
@@ -654,7 +657,14 @@ private:
 	MPTR m_importedMemBaseAddress = 0;
 
 	// command buffer, garbage collection, synchronization
+#if defined(__SWITCH__)
+	// Bound in-flight uploads on unified memory.
+	static constexpr uint32 kCommandBufferPoolSize = 16;
+	static constexpr uint32 kDefaultSubmitThreshold = 128;
+#else
 	static constexpr uint32 kCommandBufferPoolSize = 128;
+	static constexpr uint32 kDefaultSubmitThreshold = 300;
+#endif
 
 	size_t m_commandBufferIndex = 0; // current buffer being filled
 	size_t m_commandBufferSyncIndex = 0; // latest buffer that finished execution (updated on submit)
@@ -671,9 +681,13 @@ private:
 
 	uint64 m_numSubmittedCmdBuffers{};
 	uint64 m_countCommandBufferFinished{};
+#if defined(__SWITCH__)
+	bool m_switchAppletSuspended = false;
+	bool HandleSwitchAppletSuspension();
+#endif
 
 	uint32 m_recordedDrawcalls{}; // number of drawcalls recorded into current command buffer
-	uint32 m_submitThreshold{}; // submit current buffer if recordedDrawcalls exceeds this number
+	uint32 m_submitThreshold{kDefaultSubmitThreshold}; // submit current buffer if recordedDrawcalls exceeds this number
 	bool m_submitOnIdle{}; // submit current buffer if Latte command processor goes into idle state (no more commands or waiting for externally signaled condition)
 
 	// drawcall handling
@@ -954,6 +968,7 @@ public:
 	bool IsDebugMarkersEnabled() const { return m_featureControl.usingDebugMarkerTool; }
 	bool IsTracingToolEnabled() const { return m_featureControl.usingTracingTool; }
 	bool UseAttachmentFeedbackLoop() const { return m_featureControl.deviceExtensions.attachment_feedback_loop_dynamic_state; }
+	uint32 GetNonCoherentAtomSize() const { return m_featureControl.limits.nonCoherentAtomSize; }
 
 private:
 

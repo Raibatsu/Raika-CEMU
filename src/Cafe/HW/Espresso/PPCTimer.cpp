@@ -77,8 +77,17 @@ int PPCTimer_initThread()
 
 void PPCTimer_init()
 {
+#if defined(__SWITCH__)
+	// Match __rdtsc() to Horizon's physical counter frequency.
+	uint64 cntFrq = 0;
+	asm volatile("mrs %0, cntfrq_el0" : "=r"(cntFrq));
+	if (cntFrq == 0)
+		cntFrq = 19200000ULL;
+	_rdtscFrequency = cntFrq;
+#else
 	std::thread t(PPCTimer_initThread);
 	t.detach();
+#endif
 	_rdtscLastMeasure = __rdtsc();
 }
 

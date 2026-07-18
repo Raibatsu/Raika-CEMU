@@ -29,7 +29,7 @@ class VKRBuffer
 
 	VkBuffer m_buffer;
 	VkDeviceMemory m_bufferMemory;
-	uint8* m_mappedMemory;
+	uint8* m_mappedMemory{};
 	bool m_requiresFlush{false};
 };
 
@@ -52,7 +52,7 @@ public:
 
 	struct ChunkInfo
 	{
-		VkDeviceMemory mem;
+		VkDeviceMemory mem{VK_NULL_HANDLE};
 	};
 
 	CHAddr allocMem(uint32 size, uint32 alignment)
@@ -185,14 +185,17 @@ public:
 
 	AllocatorReservation_t AllocateBufferMemory(uint32 size, uint32 alignment);
 	void FlushReservation(AllocatorReservation_t& uploadReservation);
+	void FlushPendingRanges();
 	void CleanupBuffer(uint64 latestFinishedCommandBufferId);
 	VkBuffer GetBufferByIndex(uint32 index) const;
 
 	void GetStats(uint32& numBuffers, size_t& totalBufferSize, size_t& freeBufferSize) const;
 
 private:
-	void allocateAdditionalUploadBuffer(uint32 sizeRequiredForAlloc);
+	AllocatorReservation_t allocateBufferMemory(uint32 size, uint32 alignment, bool didReclaim);
+	bool allocateAdditionalUploadBuffer(uint32 sizeRequiredForAlloc);
 	void addUploadBufferSyncPoint(AllocatorBuffer_t& buffer, uint32 offset);
+	void releaseAllReservations();
 
 	const class VulkanRenderer* m_vkr;
 	const class VKRMemoryManager* m_vkrMemMgr;
@@ -200,6 +203,9 @@ private:
 	const uint32 m_minimumBufferAllocSize;
 
 	std::vector<AllocatorBuffer_t> m_buffers;
+#if defined(__SWITCH__)
+	std::vector<VkMappedMemoryRange> m_pendingFlushRanges;
+#endif
 
 };
 
@@ -229,6 +235,7 @@ class VKRSynchronizedHeapAllocator
 	AllocatorReservation* AllocateBufferMemory(uint32 size, uint32 alignment);
 	void FreeReservation(AllocatorReservation* uploadReservation);
 	void FlushReservation(AllocatorReservation* uploadReservation);
+	void FlushPendingRanges();
 
 	void CleanupBuffer(uint64 latestFinishedCommandBufferId);
 
@@ -241,6 +248,9 @@ class VKRSynchronizedHeapAllocator
 	MemoryPool<AllocatorReservation> m_poolAllocatorReservation{32};
 	// release queue
 	std::unordered_map<uint64, std::vector<CHAddr>> m_releaseQueue;
+#if defined(__SWITCH__)
+	std::vector<VkMappedMemoryRange> m_pendingFlushRanges;
+#endif
 };
 
 void LatteIndices_invalidateAll();
@@ -266,7 +276,6 @@ public:
 	{
 		if (m_textureUploadBuffer.size() < size)
 			m_textureUploadBuffer.resize(size);
-
 		return m_textureUploadBuffer.data();
 	}
 
@@ -274,6 +283,12 @@ public:
 	{
 		cemu_assert_debug(m_textureUploadBuffer.data() == mem);
 		m_textureUploadBuffer.clear();
+	}
+
+	void FlushPendingRanges()
+	{
+		m_stagingBuffer.FlushPendingRanges();
+		m_indexBuffer.FlushPendingRanges();
 	}
 
 	VKRSynchronizedRingAllocator& getStagingAllocator() { return m_stagingBuffer; }; // allocator for texture/attribute/uniform uploads

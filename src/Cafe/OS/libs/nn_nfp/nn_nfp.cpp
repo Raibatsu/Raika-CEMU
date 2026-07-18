@@ -5,6 +5,9 @@
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "Common/FileStream.h"
 #include "Cafe/CafeSystem.h"
+#ifdef __SWITCH__
+#include "platform/switch/SwitchAmiibo.h"
+#endif
 
 std::recursive_mutex g_nfpMutex;
 
@@ -180,6 +183,7 @@ struct
 	bool hasOpenApplicationArea; // set to true if application area was opened or created
 	// currently active Amiibo
 	bool hasActiveAmiibo;
+	bool isHostTag;
 	fs::path amiiboPath;
 	bool hasInvalidHMAC;
 	uint32 amiiboTouchTime;
@@ -232,6 +236,7 @@ void nnNfpExport_Initialize(PPCInterpreter_t* hCPU)
 	nfp_data.nfpIsInitialized = true;
 	nfp_data.isDetecting = false;
 	nfp_data.hasActiveAmiibo = false;
+	nfp_data.isHostTag = false;
 	nfp_data.hasOpenApplicationArea = false;
 	nfp_data.activateEvent = MPTR_NULL;
 	nfp_data.deactivateEvent = MPTR_NULL;
@@ -749,6 +754,7 @@ void nnNfp_unloadAmiibo()
 	nnNfpLock();
 	nfp_data.isMounted = false;
 	nfp_data.hasActiveAmiibo = false;
+	nfp_data.isHostTag = false;
 	nnNfpUnlock();
 }
 
@@ -840,6 +846,7 @@ bool nnNfp_touchNfcTagFromFile(const fs::path& filePath, uint32* nfcError)
 	// decrypt amiibo
 	amiiboDecrypt();
 	nfp_data.amiiboPath = filePath;
+	nfp_data.isHostTag = false;
 	nfp_data.hasActiveAmiibo = true;
 	if (nfp_data.activateEvent)
 	{
@@ -848,8 +855,105 @@ bool nnNfp_touchNfcTagFromFile(const fs::path& filePath, uint32* nfcError)
 	}
 	nfp_data.amiiboTouchTime = GetTickCount();
 	nnNfpUnlock();
-	*nfcError = NFC_ERROR_NO_ACCESS;
+	*nfcError = NFC_ERROR_NONE;
 	return true;
+}
+
+bool nnNfp_touchNfcTagFromHost(const NfpHostTag& tag, uint32* nfcError)
+{
+	if (tag.uidLength == 0 || tag.uidLength > 10)
+	{
+		*nfcError = NFC_ERROR_INVALID_FILE_FORMAT;
+		return false;
+	}
+
+	nnNfp_unloadAmiibo();
+	nnNfpLock();
+	nfp_data.amiiboNFCData = {};
+	nfp_data.amiiboInternal = {};
+	nfp_data.amiiboProcessedData = {};
+
+	const uint8 uidLength = std::min<uint8>(tag.uidLength, sizeof(nfp_data.amiiboProcessedData.uid));
+	nfp_data.amiiboProcessedData.uidLength = uidLength;
+	memcpy(nfp_data.amiiboProcessedData.uid, tag.uid, uidLength);
+
+	auto& rawId = nfp_data.amiiboNFCData.amiiboIdentificationBlock;
+	auto& internalId = nfp_data.amiiboInternal.amiiboIdentificationBlock;
+	memcpy(rawId.gameAndCharacterId, tag.characterId, 2);
+	memcpy(internalId.gameAndCharacterId, tag.characterId, 2);
+	rawId.characterVariation = internalId.characterVariation = tag.characterId[2];
+	rawId.amiiboSeries = internalId.amiiboSeries = tag.seriesId;
+	rawId.amiiboFigureType = internalId.amiiboFigureType = tag.figureType;
+	rawId.amiiboModelNumber[0] = internalId.amiiboModelNumber[0] = static_cast<uint8>(tag.modelNumber >> 8);
+	rawId.amiiboModelNumber[1] = internalId.amiiboModelNumber[1] = static_cast<uint8>(tag.modelNumber);
+
+	nfp_data.amiiboInternal.ukn_A5 = 0xA5;
+	nfp_data.amiiboInternal.writeCounterHigh = static_cast<uint8>(tag.tagWriteCounter >> 8);
+	nfp_data.amiiboInternal.writeCounterLow = static_cast<uint8>(tag.tagWriteCounter);
+	auto& settings = nfp_data.amiiboInternal.amiiboSettings;
+	if (tag.flags & 0x01)
+		settings.flags |= 0x10;
+	if (tag.flags & 0x02)
+		settings.flags |= 0x20;
+	settings.appDataTitleIdHigh = static_cast<uint32>(tag.applicationId >> 32);
+	settings.appDataTitleIdLow = static_cast<uint32>(tag.applicationId);
+	settings.setAppDataAppId(tag.accessId);
+	settings.appWriteCounter = tag.writeCounter;
+	memcpy(settings.mii, tag.mii, sizeof(tag.mii));
+	for (size_t index = 0; index < std::min(std::size(tag.nickname), std::size(settings.nickname)); ++index)
+		settings.nickname[index] = tag.nickname[index];
+	memcpy(nfp_data.amiiboInternal.applicationData, tag.applicationArea,
+	       std::min<size_t>(tag.applicationAreaSize, sizeof(tag.applicationArea)));
+
+	nfp_data.amiiboPath.clear();
+	nfp_data.hasInvalidHMAC = false;
+	nfp_data.isHostTag = true;
+	nfp_data.hasActiveAmiibo = true;
+	if (nfp_data.activateEvent)
+	{
+		MEMPTR<coreinit::OSEvent> event(nfp_data.activateEvent);
+		coreinit::OSSignalEvent(event);
+	}
+	nfp_data.amiiboTouchTime = GetTickCount();
+	nnNfpUnlock();
+	*nfcError = NFC_ERROR_NONE;
+	return true;
+}
+
+void nnNfp_refreshHostTag()
+{
+	nnNfpLock();
+	if (nfp_data.hasActiveAmiibo && nfp_data.isHostTag)
+		nfp_data.amiiboTouchTime = GetTickCount();
+	nnNfpUnlock();
+}
+
+bool nnNfp_isHostTagPresent()
+{
+	nnNfpLock();
+	const bool present = nfp_data.hasActiveAmiibo && nfp_data.isHostTag;
+	nnNfpUnlock();
+	return present;
+}
+
+void nnNfp_removeHostTag()
+{
+	nnNfpLock();
+	if (!nfp_data.hasActiveAmiibo || !nfp_data.isHostTag)
+	{
+		nnNfpUnlock();
+		return;
+	}
+	nfp_data.isMounted = false;
+	nfp_data.hasActiveAmiibo = false;
+	nfp_data.isHostTag = false;
+	const MPTR eventAddress = nfp_data.deactivateEvent;
+	nnNfpUnlock();
+	if (eventAddress)
+	{
+		MEMPTR<coreinit::OSEvent> event(eventAddress);
+		coreinit::OSSignalEvent(event);
+	}
 }
 
 bool nnNfp_writeCurrentAmiibo()
@@ -865,6 +969,25 @@ bool nnNfp_writeCurrentAmiibo()
 	writeCounter++;
 	nfp_data.amiiboInternal.writeCounterLow = writeCounter & 0xFF;
 	nfp_data.amiiboInternal.writeCounterHigh = (writeCounter >> 8) & 0xFF;
+
+	if (nfp_data.isHostTag)
+	{
+#ifdef __SWITCH__
+		if ((nfp_data.amiiboInternal.amiiboSettings.flags & 0x20) == 0)
+		{
+			nnNfpUnlock();
+			return SwitchAmiibo_DeleteApplicationArea();
+		}
+		const uint32 accessId = nfp_data.amiiboInternal.amiiboSettings.getAppDataAppId();
+		std::array<uint8, sizeof(nfp_data.amiiboInternal.applicationData)> applicationArea;
+		memcpy(applicationArea.data(), nfp_data.amiiboInternal.applicationData, applicationArea.size());
+		nnNfpUnlock();
+		return SwitchAmiibo_WriteApplicationArea(accessId, applicationArea.data(), applicationArea.size());
+#else
+		nnNfpUnlock();
+		return false;
+#endif
+	}
 
 	// open file for writing
 	FileStream* fs = FileStream::openFile2(nfp_data.amiiboPath, true);

@@ -3,7 +3,10 @@
 #include <boost/predef/os.h>
 #include <cstdint>
 
-#if BOOST_OS_WINDOWS
+// Boost.Predef does not identify Horizon OS.
+#if defined(__SWITCH__)
+#include "Common/switch/platform.h"
+#elif BOOST_OS_WINDOWS
 #include "Common/windows/platform.h"
 #elif BOOST_OS_LINUX || BOOST_OS_BSD
 #if BOOST_OS_LINUX

@@ -54,13 +54,17 @@ private:
 	int CompilerThread();
 	void WorkerThread();
 
-	std::thread* m_pipelineCacheStoreThread;
+	bool m_pipelineCacheStoreThreadStarted{};
+	std::thread m_pipelineCacheStoreThread;
+	ConcurrentQueue<struct CachedPipeline*> m_pipelineCachingQueue;
 
 	std::unordered_set<PipelineHash, PipelineHash::HashFunc> m_pipelineIsCached;
 	FSpinlock m_pipelineIsCachedLock;
-	class FileCache* s_cache;
+	class FileCache* s_cache{};
+	std::mutex m_cacheMutex;
+	uint64 m_cacheGeneration{};
 
 	std::atomic_uint32_t m_numCompilationThreads{ 0 };
+	std::vector<std::thread> m_compilationThreads;
 	ConcurrentQueue<std::vector<uint8>> m_compilationQueue;
-	std::atomic_uint32_t m_compilationCount;
 };

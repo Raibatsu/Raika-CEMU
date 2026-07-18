@@ -71,6 +71,7 @@ namespace iosu
 
 		void CreatePlaystats()
 		{
+			MakeDirectory();
 			PlayStats.fs = FileStream::createFile2(GetPDFile("PlayStats.dat"));
 			if (!PlayStats.fs)
 			{
@@ -97,6 +98,10 @@ namespace iosu
 			if (!PlayStats.fs)
 			{
 				CreatePlaystats();
+#if defined(__SWITCH__)
+				delete PlayStats.fs;
+				PlayStats.fs = nullptr;
+#endif
 				return;
 			}
 			if (PlayStats.fs->GetSize() != (NUM_PLAY_STATS_ENTRIES * 20 + 4))
@@ -112,6 +117,11 @@ namespace iosu
 			if (PlayStats.numEntries > NUM_PLAY_STATS_ENTRIES)
 				PlayStats.numEntries = NUM_PLAY_STATS_ENTRIES;
 			PlayStats.fs->readData(PlayStats.entry, NUM_PLAY_STATS_ENTRIES * 20);
+#if defined(__SWITCH__)
+			// Avoid retaining fsdev descriptors across Horizon lifecycle transitions.
+			delete PlayStats.fs;
+			PlayStats.fs = nullptr;
+#endif
 		}
 
 		void ClosePlaystats()
@@ -149,22 +159,33 @@ namespace iosu
 
 		void PlayStats_WriteEntryNoLock(PlayStatsEntry* entry, bool writeEntryCount = false)
 		{
-			if (!PlayStats.fs)
+#if defined(__SWITCH__)
+			FileStream* file = FileStream::openFile2(GetPDFile("PlayStats.dat"), true);
+#else
+			FileStream* file = PlayStats.fs;
+#endif
+			if (!file)
 				return;
 			size_t entryIndex = entry - PlayStats.entry;
 			cemu_assert(entryIndex < NUM_PLAY_STATS_ENTRIES);
-			PlayStats.fs->SetPosition(4 + entryIndex * sizeof(PlayStatsEntry));
-			if (PlayStats.fs->writeData(entry, sizeof(PlayStatsEntry)) != sizeof(PlayStatsEntry))
+			file->SetPosition(4 + entryIndex * sizeof(PlayStatsEntry));
+			if (file->writeData(entry, sizeof(PlayStatsEntry)) != sizeof(PlayStatsEntry))
 			{
 				cemuLog_log(LogType::Force, "Failed to write to PlayStats.dat");
+#if defined(__SWITCH__)
+				delete file;
+#endif
 				return;
 			}
 			if (writeEntryCount)
 			{
 				uint32be numEntries = PlayStats.numEntries;
-				PlayStats.fs->SetPosition(0);
-				PlayStats.fs->writeData(&numEntries, sizeof(uint32be));
+				file->SetPosition(0);
+				file->writeData(&numEntries, sizeof(uint32be));
 			}
+#if defined(__SWITCH__)
+			delete file;
+#endif
 		}
 
 		void PlayStats_WriteEntry(PlayStatsEntry* entry, bool writeEntryCount = false)
@@ -274,6 +295,10 @@ namespace iosu
 			if (!PlayDiaryData.fs)
 			{
 				CreatePlayDiary();
+#if defined(__SWITCH__)
+				delete PlayDiaryData.fs;
+				PlayDiaryData.fs = nullptr;
+#endif
 				return;
 			}
 			// read header
@@ -283,9 +308,13 @@ namespace iosu
 				delete PlayDiaryData.fs;
 				PlayDiaryData.fs = nullptr;
 				CreatePlayDiary();
+#if defined(__SWITCH__)
+				delete PlayDiaryData.fs;
+				PlayDiaryData.fs = nullptr;
+#endif
 				return;
 			}
-			if (PlayDiaryData.header.readIndex > NUM_PLAY_DIARY_ENTRIES_MAX || PlayDiaryData.header.writeIndex > NUM_PLAY_DIARY_ENTRIES_MAX)
+			if (PlayDiaryData.header.readIndex >= NUM_PLAY_DIARY_ENTRIES_MAX || PlayDiaryData.header.writeIndex >= NUM_PLAY_DIARY_ENTRIES_MAX)
 			{
 				cemuLog_log(LogType::Force, "Bad value in play diary header (read={} write={})", (uint32)PlayDiaryData.header.readIndex, (uint32)PlayDiaryData.header.writeIndex);
 				PlayDiaryData.header.readIndex = PlayDiaryData.header.readIndex % NUM_PLAY_DIARY_ENTRIES_MAX;
@@ -302,6 +331,10 @@ namespace iosu
 				PlayDiaryData.entry[readEntries].ukn0E = 0;
 				readEntries++;
 			}
+#if defined(__SWITCH__)
+			delete PlayDiaryData.fs;
+			PlayDiaryData.fs = nullptr;
+#endif
 		}
 
 		void ClosePlayDiary()

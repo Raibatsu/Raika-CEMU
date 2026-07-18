@@ -524,17 +524,14 @@ void LatteIndices_fastConvertU16_NEON(const void* indexDataInput, void* indexDat
 		{
 			mTemp = vld1q_u16((uint16*)mRawIndices);
 			mRawIndices++;
-			mTemp = vrev16q_u8(mTemp);
+			// GCC requires explicit vector reinterpretation.
+			mTemp = vreinterpretq_u16_u8(vrev16q_u8(vreinterpretq_u8_u16(mTemp)));
 			mMax = vmaxq_u16(mMax, mTemp);
 			vst1q_u16((uint16*)mOutputIndices, mTemp);
 			mOutputIndices++;
 		}
 
-		uint16* mMaxU16 = (uint16*)&mMax;
-
-		for (int i = 0; i < 8; ++i) {
-			indexMax = std::max(indexMax, (uint32)mMaxU16[i]);
-		}
+		indexMax = std::max(indexMax, (uint32)vmaxvq_u16(mMax));
 	}
 	// process remaining indices
 	uint32 _maxIndex = 0;
@@ -570,17 +567,14 @@ void LatteIndices_fastConvertU32_NEON(const void* indexDataInput, void* indexDat
 		{
 			mTemp = vld1q_u32((uint32*)mRawIndices);
 			mRawIndices++;
-			mTemp = vrev32q_u8(mTemp);
+			// GCC requires explicit vector reinterpretation.
+			mTemp = vreinterpretq_u32_u8(vrev32q_u8(vreinterpretq_u8_u32(mTemp)));
 			mMax = vmaxq_u32(mMax, mTemp);
 			vst1q_u32((uint32*)mOutputIndices, mTemp);
 			mOutputIndices++;
 		}
 
-		uint32* mMaxU32 = (uint32*)&mMax;
-
-		for (int i = 0; i < 4; ++i) {
-			indexMax = std::max(indexMax, mMaxU32[i]);
-		}
+		indexMax = std::max(indexMax, vmaxvq_u32(mMax));
 	}
 	// process remaining indices
 	uint32 _maxIndex = 0;

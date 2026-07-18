@@ -84,6 +84,9 @@ public:
 
 	// cpu
 	[[nodiscard]] static CPUMode GetCPUMode();
+#if defined(__SWITCH__)
+	static void SetCPUModeOverride(CPUMode mode);
+#endif
 	[[nodiscard]] static uint8 GetTimerShiftFactor();
 
 	static void SetTimerShiftFactor(uint8 shiftFactor);
@@ -133,6 +136,10 @@ private:
 
 	// timer speed
 	inline static uint8 s_timer_shift = 3; // right shift factor, 0 -> 8x, 3 -> 1x, 4 -> 0.5x
+
+#if defined(__SWITCH__)
+	inline static CPUMode s_cpu_mode_override = CPUMode::Auto;
+#endif
 
 	// debug
 	inline static bool s_audio_aux_only = false;

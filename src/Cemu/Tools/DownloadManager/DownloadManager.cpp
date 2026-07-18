@@ -9,6 +9,7 @@
 #include "config/ActiveSettings.h"
 #include "util/ThreadPool/ThreadPool.h"
 #include "util/helpers/enum_array.hpp"
+#include "util/helpers/ThreadHelpers.h"
 
 #include "Cafe/Filesystem/FST/FST.h"
 #include "Cafe/TitleList/TitleList.h"
@@ -1497,8 +1498,7 @@ void DownloadManager::runManager()
 	cacheFilePath /= "cemu_cache.dat";
 	s_nupFileCache = FileCache::Open(cacheFilePath, true);
 	// launch worker thread
-	std::thread t(&DownloadManager::threadFunc, this);
-	t.detach();
+	cemuCreateDetachedThread(&DownloadManager::threadFunc, this);
 }
 
 // let manager known there is a new event that needs processing

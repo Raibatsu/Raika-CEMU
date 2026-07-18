@@ -8,6 +8,7 @@
 #include "openssl/x509.h"
 #include "openssl/ssl.h"
 #include "util/helpers/helpers.h"
+#include "util/helpers/ThreadHelpers.h"
 #include "Cemu/napi/napi.h"
 #include "Cemu/ncrypto/ncrypto.h"
 #include "Cafe/CafeSystem.h"
@@ -265,8 +266,7 @@ namespace iosu
 			if (g_nim.backgroundThreadStarted == false)
 			{
 				cemuLog_log(LogType::Force, "IOSU: Starting nim background thread");
-				std::thread t(nim_backgroundThread);
-				t.detach();
+				cemuCreateDetachedThread(nim_backgroundThread);
 				g_nim.backgroundThreadStarted = true;
 			}
 			while (g_nim.packageListReady == false)
@@ -338,8 +338,7 @@ namespace iosu
 			g_nim.packages.clear();
 			g_nim.packageListReady = false;
 			g_nim.backgroundThreadStarted = false;
-			std::thread t2(iosuNim_thread);
-			t2.detach();
+			cemuCreateDetachedThread(iosuNim_thread);
 			g_nim.isInitialized = true;
 		}
 

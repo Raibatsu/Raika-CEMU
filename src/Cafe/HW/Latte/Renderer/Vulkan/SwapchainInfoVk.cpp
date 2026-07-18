@@ -7,6 +7,10 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 
+#if defined(__SWITCH__)
+#include "platform/switch/SwitchPlatform.h"
+#endif
+
 SwapchainInfoVk::SwapchainInfoVk(bool mainWindow, Vector2i size) : mainWindow(mainWindow), m_desiredExtent(size)
 {
 	auto& windowHandleInfo = mainWindow ? WindowSystem::GetWindowInfo().canvas_main : WindowSystem::GetWindowInfo().canvas_pad;
@@ -34,6 +38,11 @@ void SwapchainInfoVk::Create()
 
 	// use at least two swapchain images. fewer than that causes problems on some drivers
 	uint32_t image_count = std::max(2u, details.capabilities.minImageCount);
+#if defined(__SWITCH__)
+	// Keep one image available while VI presents the previous frame.
+	if (SwitchPlatform_UseTripleBuffer())
+		image_count = std::max(3u, image_count);
+#endif
 	if(details.capabilities.maxImageCount > 0)
 		image_count = std::min(image_count, details.capabilities.maxImageCount);
 	if(image_count < 2)
@@ -171,20 +180,19 @@ void SwapchainInfoVk::Cleanup()
 		vkDestroySemaphore(m_logicalDevice, sem, nullptr);
 	m_presentSemaphores.clear();
 
-	if (m_swapchainRenderPass)
-	{
-		vkDestroyRenderPass(m_logicalDevice, m_swapchainRenderPass, nullptr);
-		m_swapchainRenderPass = nullptr;
-	}
+	for (auto& framebuffer : m_swapchainFramebuffers)
+		vkDestroyFramebuffer(m_logicalDevice, framebuffer, nullptr);
+	m_swapchainFramebuffers.clear();
 
 	for (auto& imageView : m_swapchainImageViews)
 		vkDestroyImageView(m_logicalDevice, imageView, nullptr);
 	m_swapchainImageViews.clear();
 
-	for (auto& framebuffer : m_swapchainFramebuffers)
-		vkDestroyFramebuffer(m_logicalDevice, framebuffer, nullptr);
-	m_swapchainFramebuffers.clear();
-
+	if (m_swapchainRenderPass)
+	{
+		vkDestroyRenderPass(m_logicalDevice, m_swapchainRenderPass, nullptr);
+		m_swapchainRenderPass = nullptr;
+	}
 
 	if (m_imageAvailableFence)
 	{

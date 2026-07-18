@@ -1,6 +1,7 @@
 project(cemuMain)
 
 option(CEMU_CXX_FLAGS "Additional flags used for compiling Cemu source code")
+separate_arguments(CEMU_CXX_FLAGS NATIVE_COMMAND ${CEMU_CXX_FLAGS})
 if(CEMU_CXX_FLAGS)
 	add_compile_options(${CEMU_CXX_FLAGS})
 endif()
@@ -45,7 +46,10 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
 # on msvc we can reuse the PCH from CemuCommon, on other platforms it's not straight forward to reuse the PCH so we opt out of it
 function(cemu_use_precompiled_header target_name)
-	if(MSVC)
+	if(PLATFORM_SWITCH)
+		# Generated PCH paths are not portable between MSYS and devkitA64.
+		target_compile_options(${target_name} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${CMAKE_SOURCE_DIR}/src/Common/precompiled.h>")
+	elseif(MSVC)
 		target_precompile_headers(${target_name} REUSE_FROM CemuCommon)
 	else()
 		target_precompile_headers(${target_name} PRIVATE "${CMAKE_SOURCE_DIR}/src/Common/precompiled.h")
@@ -63,10 +67,27 @@ add_subdirectory(util)
 add_subdirectory(imgui)
 add_subdirectory(resource)
 
-add_executable(CemuBin
-	main.cpp
-	mainLLE.cpp
-)
+if(PLATFORM_SWITCH)
+	add_executable(CemuBin
+		platform/switch/main_switch.cpp
+		platform/switch/WindowSystemSwitch.cpp
+		platform/switch/SwitchRenderer.cpp
+		platform/switch/SwitchJit.cpp
+		platform/switch/SwitchMemoryBudget.cpp
+		platform/switch/SwitchInput.cpp
+		platform/switch/SwitchAmiibo.cpp
+		platform/switch/SwitchOverlay.cpp
+		platform/switch/SwitchSwkbd.cpp
+		platform/switch/common/SwitchPosixCompat.cpp
+		platform/switch/common/SwitchStorage.cpp
+		platform/switch/switch_stubs.cpp
+	)
+else()
+	add_executable(CemuBin
+		main.cpp
+		mainLLE.cpp
+	)
+endif()
 
 cemu_use_precompiled_header(CemuBin)
 
@@ -237,4 +258,46 @@ endif()
 
 if (BSD)
 	target_link_libraries(CemuBin PRIVATE execinfo SPIRV-Tools SPIRV-Tools-opt)
+endif()
+
+if (PLATFORM_SWITCH)
+	set(SWITCH_LTO_JOBS "auto" CACHE STRING "Parallel GCC LTO jobs for the Switch link")
+	# The headless build still consumes fonts through imgui.
+	target_link_libraries(CemuBin PRIVATE SwitchVulkanDriver imguiImpl
+		smb2 libusbhsfs
+		"-Wl,--whole-archive" CemuResource "-Wl,--no-whole-archive")
+	target_link_options(CemuBin PRIVATE "-flto=${SWITCH_LTO_JOBS}")
+	target_include_directories(CemuBin PRIVATE
+		"${CMAKE_SOURCE_DIR}/src"
+		"${CMAKE_SOURCE_DIR}/src/gui/interface")
+
+	set(SWITCH_ROMFS "${CMAKE_BINARY_DIR}/romfs")
+	set(SWITCH_ROMFS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/switch_romfs.stamp")
+	file(GLOB_RECURSE SWITCH_ROMFS_INPUTS CONFIGURE_DEPENDS LIST_DIRECTORIES false
+		"${CMAKE_SOURCE_DIR}/bin/resources/*"
+		"${CMAKE_SOURCE_DIR}/bin/gameProfiles/*")
+	add_custom_command(
+		OUTPUT "${SWITCH_ROMFS_STAMP}"
+		COMMAND "${CMAKE_COMMAND}" -E rm -rf "${SWITCH_ROMFS}"
+		COMMAND "${CMAKE_COMMAND}" -E make_directory "${SWITCH_ROMFS}"
+		COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/bin/resources" "${SWITCH_ROMFS}/resources"
+		COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/bin/gameProfiles" "${SWITCH_ROMFS}/gameProfiles"
+		COMMAND "${CMAKE_COMMAND}" -E touch "${SWITCH_ROMFS_STAMP}"
+		DEPENDS ${SWITCH_ROMFS_INPUTS}
+		VERBATIM)
+	add_custom_target(SwitchRomfs DEPENDS "${SWITCH_ROMFS_STAMP}")
+	set_target_properties(SwitchRomfs PROPERTIES
+		DKP_ASSET_FOLDER "${SWITCH_ROMFS}"
+		DKP_ASSET_FILES "${SWITCH_ROMFS_STAMP}")
+
+	nx_generate_nacp(OUTPUT "${CMAKE_BINARY_DIR}/Cemu.nacp"
+		NAME "Cemu"
+		AUTHOR "naga"
+		VERSION "2.6")
+	nx_create_nro(CemuNro
+		TARGET CemuBin
+		OUTPUT "${CMAKE_SOURCE_DIR}/bin/Cemu.nro"
+		NACP "${CMAKE_BINARY_DIR}/Cemu.nacp"
+		ICON "${CMAKE_SOURCE_DIR}/dist/switch/icon.jpg"
+		ROMFS SwitchRomfs)
 endif()

@@ -69,7 +69,12 @@ add_library(CemuUtil
   Zir/Passes/ZpIRRegisterAllocator.cpp
 )
 
-if(WIN32)
+if(PLATFORM_SWITCH)
+	enable_language(ASM)
+	target_sources(CemuUtil PRIVATE Fiber/FiberSwitch.cpp Fiber/FiberSwitchAsm.S)
+	target_sources(CemuUtil PRIVATE MemMapper/MemMapperSwitch.cpp)
+	target_sources(CemuUtil PRIVATE SystemInfo/SystemInfoStub.cpp)
+elseif(WIN32)
 	target_sources(CemuUtil PRIVATE Fiber/FiberWin.cpp)
 	target_sources(CemuUtil PRIVATE MemMapper/MemMapperWin.cpp)
 	target_sources(CemuUtil PRIVATE SystemInfo/SystemInfoWin.cpp)

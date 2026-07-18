@@ -23,6 +23,26 @@ out/
 bin/Cemu_*
 bin/Cemu_*.exe
 
+# Nintendo Switch build outputs
+/build_switch/
+/work/
+/bin/Cemu.nro
+/bin/*.ini
+/switch_launcher/build/
+/switch_launcher/Cemu.elf
+/switch_launcher/Cemu.map
+/switch_launcher/Cemu.nacp
+/switch_launcher/Cemu.nro
+/switch_launcher/fwd/hbl.elf
+/switch_launcher/romfs/emu/
+/switch_launcher/romfs/fwd/
+/dependencies/switch_deps/
+/dependencies/switch_mesa_vulkan/
+
+# Local tool checkouts superseded by switch_launcher/fwd
+/dependencies/hacbrewpack/
+/dependencies/nro-forwarder/
+
 # Cemu bin files
 bin/otp.bin
 bin/seeprom.bin

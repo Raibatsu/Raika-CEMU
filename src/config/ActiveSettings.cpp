@@ -11,6 +11,10 @@
 #include "Cafe/Account/Account.h"
 #include "util/helpers/helpers.h"
 
+#if defined(__SWITCH__)
+#include "platform/switch/SwitchJit.h"
+#endif
+
 void ActiveSettings::SetPaths(bool isPortableMode,
 		const fs::path& executablePath,
 		const fs::path& userDataPath,
@@ -66,6 +70,24 @@ bool ActiveSettings::DisplayDRCEnabled()
 
 CPUMode ActiveSettings::GetCPUMode()
 {
+#if defined(__SWITCH__)
+	if (!SwitchJit_SyscallsAvailable())
+		return CPUMode::SinglecoreInterpreter;
+
+	const CPUMode mode = s_cpu_mode_override != CPUMode::Auto
+		? s_cpu_mode_override
+		: g_current_game_profile->GetCPUMode().value_or(CPUMode::Auto);
+	switch (mode)
+	{
+	case CPUMode::SinglecoreInterpreter:
+		return CPUMode::SinglecoreInterpreter;
+	case CPUMode::SinglecoreRecompiler:
+		return CPUMode::SinglecoreRecompiler;
+	default:
+		// Auto and legacy modes use one host thread per emulated core.
+		return CPUMode::MulticoreRecompiler;
+	}
+#else
 	auto mode = g_current_game_profile->GetCPUMode().value_or(CPUMode::Auto);
 
 	if (mode == CPUMode::Auto)
@@ -79,7 +101,25 @@ CPUMode ActiveSettings::GetCPUMode()
 		mode = CPUMode::MulticoreRecompiler;
 
 	return mode;
+#endif
 }
+
+#if defined(__SWITCH__)
+void ActiveSettings::SetCPUModeOverride(CPUMode mode)
+{
+	switch (mode)
+	{
+	case CPUMode::SinglecoreInterpreter:
+	case CPUMode::SinglecoreRecompiler:
+	case CPUMode::MulticoreRecompiler:
+		s_cpu_mode_override = mode;
+		break;
+	default:
+		s_cpu_mode_override = CPUMode::Auto;
+		break;
+	}
+}
+#endif
 
 uint8 ActiveSettings::GetTimerShiftFactor()
 {

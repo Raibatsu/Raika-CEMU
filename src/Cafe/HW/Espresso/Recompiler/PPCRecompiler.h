@@ -7,6 +7,11 @@
 
 #define PPC_REC_ALIGN_TO_4MB(__v)	(((__v)+4*1024*1024-1)&~(4*1024*1024-1))
 
+static constexpr uint32 PPC_REC_LOOKUP_BLOCK_SIZE = 4 * 1024 * 1024;
+static constexpr uint32 PPC_REC_LOOKUP_BLOCK_COUNT =
+	(PPC_REC_CODE_AREA_SIZE + PPC_REC_LOOKUP_BLOCK_SIZE - 1) / PPC_REC_LOOKUP_BLOCK_SIZE;
+static constexpr uint32 PPC_REC_LOOKUP_ENTRIES_PER_BLOCK = PPC_REC_LOOKUP_BLOCK_SIZE / 4;
+
 #define PPC_REC_MAX_VIRTUAL_GPR		(40 + 32) // enough to store 32 GPRs + a few SPRs + temp registers (usually only 1-2)
 
 struct ppcRecRange_t
@@ -127,9 +132,26 @@ struct ppcImlGenContext_t
 
 typedef void ATTR_MS_ABI (*PPCREC_JUMP_ENTRY)();
 
-typedef struct  
+struct PPCRecompilerInstanceData_t
 {
+#if defined(__SWITCH__)
+	// Sparse leaves avoid a 512 MiB flat table and Horizon's CodeMemory quota.
+	PPCREC_JUMP_ENTRY* ppcRecompilerDirectJumpTable[PPC_REC_LOOKUP_BLOCK_COUNT];
+#else
 	PPCREC_JUMP_ENTRY ppcRecompilerDirectJumpTable[PPC_REC_ALIGN_TO_4MB(PPC_REC_CODE_AREA_SIZE/4)]; // lookup table for ppc offset to native code function
+#endif
+
+	PPCREC_JUMP_ENTRY& GetJumpTableEntry(uint32 ppcAddress)
+	{
+#if defined(__SWITCH__)
+		const uint32 blockIndex = ppcAddress / PPC_REC_LOOKUP_BLOCK_SIZE;
+		const uint32 entryIndex = (ppcAddress % PPC_REC_LOOKUP_BLOCK_SIZE) / 4;
+		return ppcRecompilerDirectJumpTable[blockIndex][entryIndex];
+#else
+		return ppcRecompilerDirectJumpTable[ppcAddress / 4];
+#endif
+	}
+
 	// x64 data
 	alignas(16) uint64 _x64XMM_xorNegateMaskBottom[2];
 	alignas(16) uint64 _x64XMM_xorNegateMaskPair[2];
@@ -148,7 +170,7 @@ typedef struct
 	// MXCSR
 	uint32 _x64XMM_mxCsr_ftzOn;
 	uint32 _x64XMM_mxCsr_ftzOff;
-}PPCRecompilerInstanceData_t;
+};
 
 extern PPCRecompilerInstanceData_t* ppcRecompilerInstanceData;
 

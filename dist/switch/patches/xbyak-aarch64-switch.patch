@@ -1,0 +1,158 @@
+diff --git a/src/util_impl.cpp b/src/util_impl.cpp
+--- a/src/util_impl.cpp
++++ b/src/util_impl.cpp
+@@ -23,7 +23,9 @@
+ 
+ #include "util_impl.h"
+ 
+-#if defined(__linux__)
++#if defined(__SWITCH__)
++#include "util_impl_switch.h"
++#elif defined(__linux__)
+ #include "util_impl_linux.h"
+ #elif defined(__APPLE__)
+ #include "util_impl_mac.h"
+@@ -150,7 +152,9 @@ void CpuInfo::setLastDataCacheLevel() {
+ }
+ 
+ Cpu::Cpu() {
+-#if defined(__linux__)
++#if defined(__SWITCH__)
++  info = new CpuInfoSwitch();
++#elif defined(__linux__)
+   info = new CpuInfoLinux();
+ #elif defined(__APPLE__)
+   info = new CpuInfoMac();
+diff --git a/src/util_impl_switch.h b/src/util_impl_switch.h
+new file mode 100644
+--- /dev/null
++++ b/src/util_impl_switch.h
+@@ -0,0 +1,52 @@
++// SPDX-License-Identifier: Apache-2.0
++#pragma once
++
++#ifndef __SWITCH__
++#error "util_impl_switch.h requires __SWITCH__"
++#endif
++
++#include <stdint.h>
++
++#include "xbyak_aarch64_err.h"
++#include "xbyak_aarch64_util.h"
++
++namespace Xbyak_aarch64 {
++namespace util {
++
++class CpuInfoSwitch : public CpuInfo {
++public:
++  CpuInfoSwitch() {
++    init();
++    cacheInfo_.midr_el1 = 0x411FD070;
++    setNumCores();
++    setHwCap();
++    setCacheHierarchy();
++    setImplementer();
++  }
++
++private:
++  void setNumCores() {
++    numCores_[0] = numCores_[1] = 4;
++  }
++
++  void setHwCap() {
++    type_ |= (Type)XBYAK_AARCH64_HWCAP_FP;
++    type_ |= (Type)XBYAK_AARCH64_HWCAP_ADVSIMD;
++    type_ |= (Type)XBYAK_AARCH64_HWCAP_CRC;
++  }
++
++  void setCacheHierarchy() {
++    cacheInfo_.levelCache[0].type = SeparateCache;
++    cacheInfo_.levelCache[0].size[0] = 48 * 1024;
++    cacheInfo_.levelCache[0].size[1] = 32 * 1024;
++    cacheInfo_.levelCache[0].sharingCores[0] = 1;
++    cacheInfo_.levelCache[0].sharingCores[1] = 1;
++    cacheInfo_.levelCache[1].type = UnifiedCache;
++    cacheInfo_.levelCache[1].size[2] = 2 * 1024 * 1024;
++    cacheInfo_.levelCache[1].sharingCores[2] = 4;
++    lastDataCacheLevel_ = 2;
++  }
++};
++
++} // namespace util
++} // namespace Xbyak_aarch64
+diff --git a/xbyak_aarch64/xbyak_aarch64.h b/xbyak_aarch64/xbyak_aarch64.h
+--- a/xbyak_aarch64/xbyak_aarch64.h
++++ b/xbyak_aarch64/xbyak_aarch64.h
+@@ -37,7 +37,8 @@
+ #include <unordered_set>
+ #include <vector>
+ 
+-#if defined(__GNUC__) || defined(__APPLE__)
++// Horizon executable memory is provided by libnx Jit.
++#if (defined(__GNUC__) || defined(__APPLE__)) && !defined(__SWITCH__)
+ #ifndef XBYAK_USE_MMAP_ALLOCATOR
+ #define XBYAK_USE_MMAP_ALLOCATOR
+ #endif
+@@ -46,11 +47,16 @@
+ #include <cmath>
+ #include <functional>
+ 
+-#if defined(__GNUC__)
++#if defined(__GNUC__) && !defined(__SWITCH__)
+ #include <cassert>
+ #include <stdlib.h>
+ #include <sys/mman.h>
+ #include <unistd.h>
++#elif defined(__SWITCH__)
++#include <cassert>
++#include <stdlib.h>
++#include <malloc.h>
++#include <unistd.h>
+ #endif
+ 
+ #include <cstdint>
+diff --git a/xbyak_aarch64/xbyak_aarch64_code_array.h b/xbyak_aarch64/xbyak_aarch64_code_array.h
+--- a/xbyak_aarch64/xbyak_aarch64_code_array.h
++++ b/xbyak_aarch64/xbyak_aarch64_code_array.h
+@@ -22,6 +22,8 @@ static const size_t CSIZE = sizeof(uint32_t);
+ inline void *AlignedMalloc(size_t size, size_t alignment) {
+ #ifdef _MSC_VER
+   return _aligned_malloc(size, alignment);
++#elif defined(__SWITCH__)
++  return memalign(alignment, size);
+ #else
+   void *p;
+   int ret = posix_memalign(&p, alignment, size);
+@@ -233,6 +235,13 @@ public:
+      @return true(success), false(failure)
+   */
+   static inline bool protect(const void *addr, size_t size, int protectMode) {
++#if defined(__SWITCH__)
++    // libnx Jit aliases own the protection state on Horizon.
++    (void)addr;
++    (void)size;
++    (void)protectMode;
++    return true;
++#else
+ #if defined(_WIN32)
+     const DWORD c_rw = PAGE_READWRITE;
+     const DWORD c_rwe = PAGE_EXECUTE_READWRITE;
+@@ -269,6 +278,7 @@ public:
+     return VirtualProtect(const_cast<void *>(addr), size, mode, &oldProtect) != 0;
+ #else
+     return true;
++#endif
+ #endif
+   }
+   /**
+diff --git a/xbyak_aarch64/xbyak_aarch64_util.h b/xbyak_aarch64/xbyak_aarch64_util.h
+--- a/xbyak_aarch64/xbyak_aarch64_util.h
++++ b/xbyak_aarch64/xbyak_aarch64_util.h
+@@ -17,6 +17,6 @@
+ #ifndef XBYAK_AARCH64_UTIL_H_
+ #define XBYAK_AARCH64_UTIL_H_
+ 
+-#if !(defined(__linux__) || defined(__APPLE__) || defined(_M_ARM64))
++#if !(defined(__linux__) || defined(__APPLE__) || defined(_M_ARM64) || defined(__SWITCH__))
+ #error "Unsupported OS"
+ #endif

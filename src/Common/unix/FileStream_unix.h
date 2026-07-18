@@ -52,7 +52,11 @@ class FileStream
 	FileStream(const fs::path& path, bool isOpen, bool isWriteable);
 
 	bool m_isValid{};
+#if defined(__SWITCH__)
+	int m_fileDescriptor{-1};
+#else
 	std::fstream m_fileStream;
 	bool m_prevOperationWasWrite{false};
+#endif
 
 };

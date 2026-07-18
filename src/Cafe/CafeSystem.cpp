@@ -1,5 +1,6 @@
 #include "Cafe/OS/common/OSCommon.h"
 #include "WindowSystem.h"
+
 #include "Cafe/OS/libs/gx2/GX2.h"
 #include "Cafe/GameProfile/GameProfile.h"
 #include "Cafe/HW/Espresso/Interpreter/PPCInterpreterInternal.h"
@@ -13,6 +14,7 @@
 #include "Cafe/TitleList/GameInfo.h"
 #include "Cafe/GraphicPack/GraphicPack2.h"
 #include "util/helpers/SystemException.h"
+#include "util/helpers/ThreadHelpers.h"
 #include "Common/cpu_features.h"
 #include "input/InputManager.h"
 #include "Cafe/CafeSystem.h"
@@ -26,7 +28,6 @@
 #include "Common/FileStream.h"
 #include "GamePatch.h"
 #include "HW/Espresso/Debugger/GDBStub.h"
-
 #include "Cafe/IOSU/legacy/iosu_ioctl.h"
 #include "Cafe/IOSU/legacy/iosu_act.h"
 #include "Cafe/IOSU/legacy/iosu_fpd.h"
@@ -300,8 +301,9 @@ uint32 LoadSharedData()
 	bool hasAllShareddataFiles = true;
 	for (sint32 i = 0; i < sizeof(shareddataDef) / sizeof(shareddataDef[0]); i++)
 	{
-		bool existsInMLC = fs::exists(ActiveSettings::GetMlcPath(shareddataDef[i].mlcPath));
-		bool existsInResources = fs::exists(ActiveSettings::GetDataPath(shareddataDef[i].resourcePath));
+		std::error_code shareEc;
+		bool existsInMLC = fs::exists(ActiveSettings::GetMlcPath(shareddataDef[i].mlcPath), shareEc);
+		bool existsInResources = fs::exists(ActiveSettings::GetDataPath(shareddataDef[i].resourcePath), shareEc);
 
 		if (!existsInMLC && !existsInResources)
 		{
@@ -589,6 +591,8 @@ namespace CafeSystem
 		#else
 		platform = "Unknown BSD";
 		#endif
+		#elif defined(__SWITCH__)
+		platform = "Nintendo Switch";
 		#endif
 		cemuLog_log(LogType::Force, "Platform: {}", platform);
 	}
@@ -894,11 +898,13 @@ namespace CafeSystem
 		uint32 h = generateHashFromRawRPXData(execData->data(), execData->size());
 		sForegroundTitleId = 0xFFFFFFFF00000000ULL | (uint64)h;
 		cemuLog_log(LogType::Force, "Generated placeholder TitleId: {:016x}", sForegroundTitleId);
-		// setup memory space and ppc recompiler
+        // setup memory space and ppc recompiler
         SetupMemorySpace();
         PPCRecompiler_init();
-        // load executable
-        PrepareExecutable();
+		// load executable
+		auto result = PrepareExecutable();
+		if (result != PREPARE_STATUS_CODE::SUCCESS)
+			return result;
 		InitVirtualMlcStorage();
 		MountExtras();
 		return PREPARE_STATUS_CODE::SUCCESS;
@@ -922,8 +928,11 @@ namespace CafeSystem
 		// start system
 		sSystemRunning = true;
 		WindowSystem::NotifyGameLoaded();
-		std::thread t(_LaunchTitleThread);
-		t.detach();
+#if defined(__SWITCH__)
+		_LaunchTitleThread();
+#else
+		cemuCreateDetachedThread(_LaunchTitleThread);
+#endif
 	}
 
 	bool IsTitleRunning()

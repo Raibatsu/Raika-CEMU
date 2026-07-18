@@ -1102,6 +1102,9 @@ void PipelineCompiler::CompileThreadPool_Start()
 	s_compileThreadsShutdownSignal = false;
 	uint32 numCompileThreads;
 
+#if defined(__SWITCH__)
+	numCompileThreads = 1;
+#else
 	uint32 cpuCoreCount = GetPhysicalCoreCount();
 	if (cpuCoreCount <= 2)
 		numCompileThreads = 1;
@@ -1109,6 +1112,7 @@ void PipelineCompiler::CompileThreadPool_Start()
 		numCompileThreads = 2 + (cpuCoreCount - 3); // 2 plus one additionally for every extra core above 3
 
 	numCompileThreads = std::min(numCompileThreads, 8u); // cap at 8
+#endif
 
 	for (uint32_t i = 0; i < numCompileThreads; i++)
 	{

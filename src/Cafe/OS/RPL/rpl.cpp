@@ -272,6 +272,11 @@ bool RPLLoader_ProcessHeaders(std::string_view moduleName, uint8* rplData, uint3
 	rplLoaderContext->sectionAddressTable2.resize(sectionCount);
 	// init modulename
 	rplLoaderContext->moduleName.assign(moduleName);
+	std::string fileName{moduleName};
+	fileName.append(rplLoaderContext->IsRPX() ? ".rpx" : ".rpl");
+	// allocate modulename in PPC memory
+	rplLoaderContext->ppcName = coreinit_allocFromSysArea(fileName.size() + 1, 4);
+	memcpy(rplLoaderContext->ppcName.GetPtr(), fileName.data(), fileName.size() + 1);
 
 	// load CRC section
 	uint32 crcTableExpectedSize = sectionCount * sizeof(uint32be);
@@ -1932,14 +1937,12 @@ COSModule* RPLLoader_GetHLECafeOSModule(std::string_view moduleName)
 
 bool RPLLoader_CanUseNativeSwkbd()
 {
-	bool hasSwkbdPack = fsc_doesFileExist("vol/storage_mlc01/sys/title/0005001b/1004f000/content/00/swkbd/swkbd.pack");
-	return hasSwkbdPack;
+	return fsc_doesFileExist("vol/storage_mlc01/sys/title/0005001b/1004f000/content/00/swkbd/swkbd.pack");
 }
 
 bool RPLLoader_CanUseNativeErrEula()
 {
-	bool hasErrEulaPack = fsc_doesFileExist("vol/storage_mlc01/sys/title/0005001b/10051000/content/00/erreula/erreula.pack");
-	return hasErrEulaPack;
+	return fsc_doesFileExist("vol/storage_mlc01/sys/title/0005001b/10051000/content/00/erreula/erreula.pack");
 }
 
 // increment reference counter for module
@@ -1972,14 +1975,10 @@ void RPLLoader_AddDependency(std::string_view name, bool isMainExecutable)
 		cemuLog_log(LogType::Force, "RPLLoader_AddDependency(): RPL module name too long \"{}\"", moduleName);
 	std::string fileName = moduleName;
 	fileName.append(isMainExecutable ? ".rpx" : ".rpl");
-	// load order:
-	// 1) cafeLibs (Cemu specific)
-	// 2) SLC /vol/system/title/00050010/1000400a/code (Cemu HLE modules)
-	// 3) The game's code directory
-	// note: Some games ship with copies of system RPLs which are never actually loaded since the SLC lookup takes precedence (Example games include MH3G which has erreula.rpl and swkbd.rpl, Disney Epic Mickey 2 which comes with erreula.rpl)
+	// Prefer cafeLibs, then HLE modules, then the title's code directory.
 	const auto cafeLibsFilePath = ActiveSettings::GetUserDataPath("cafeLibs/{}", fileName);
 	std::error_code ec;
-	bool rplExistsInCafeLibs = fs::exists(cafeLibsFilePath, ec) && ActiveSettings::LoadSharedLibrariesEnabled(); // load from cafeLibs only if the option is enabled
+	bool rplExistsInCafeLibs = fs::exists(cafeLibsFilePath, ec) && ActiveSettings::LoadSharedLibrariesEnabled();
 	bool isBlacklisted = false;
 	if (rplExistsInCafeLibs)
 	{
@@ -1988,8 +1987,6 @@ void RPLLoader_AddDependency(std::string_view name, bool isMainExecutable)
 		if (newDependency->moduleName == "erreula" && !RPLLoader_CanUseNativeErrEula())
 			isBlacklisted = true;
 	}
-	if (isBlacklisted)
-		cemuLog_log(LogType::Force, "Game tried to load {}.rpl from cafeLibs/ but the necessary MLC data files are not present. Using Cemu's implementation instead", moduleName);
 	if (!rplExistsInCafeLibs || isBlacklisted)
 		newDependency->rplHLEModule = RPLLoader_GetHLECafeOSModule(moduleName);
 	rplDependencyList.push_back(newDependency);
@@ -2068,6 +2065,16 @@ uint32 RPLLoader_GetHandleByModuleName(const char* name)
 		}
 	}
 	return RPL_INVALID_HANDLE;
+}
+
+const std::string RPLLoader_GetModuleNameByHandle(uint32 handle)
+{
+	for (auto& dependency : rplDependencyList)
+	{
+		if (dependency->coreinitHandle == handle)
+			return dependency->moduleName;
+	}
+	return {};
 }
 
 uint32 RPLLoader_GetMaxTLSModuleIndex()
@@ -2152,7 +2159,6 @@ void RPLLoader_LoadDependency(RPLDependency* dependency)
 	rplPath.append(rplFilename);
 	if (RPLLoader_LoadFromVirtualPath(dependency, rplPath))
 		return;
-	cemuLog_logDebug(LogType::Force, "Failed to load dependency {}", rplFilename);
 }
 
 // loads and unloads modules based on the current dependency list

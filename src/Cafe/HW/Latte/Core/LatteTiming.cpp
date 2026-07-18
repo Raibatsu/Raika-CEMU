@@ -55,12 +55,14 @@ bool s_usingHostDrivenVSync = false;
 
 void LatteTiming_EnableHostDrivenVSync()
 {
+#ifndef __SWITCH__
 	if (s_usingHostDrivenVSync)
 		return;
 	#ifdef ENABLE_VULKAN
 	VsyncDriver_startThread(LatteTiming_NotifyHostVSync);
 	s_usingHostDrivenVSync = true;
 	#endif
+#endif
 }
 
 bool LatteTiming_IsUsingHostDrivenVSync()

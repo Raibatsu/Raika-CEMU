@@ -364,9 +364,10 @@ namespace NCrypto
 
 		uint8 sharedKey[128]{};
 		int sharedKeyLen = ECDH_compute_key(sharedKey, sizeof(sharedKey), ec_publicKey, ec_privKey, nullptr);
-		cemu_assert(sharedKeyLen > 16);
 		EC_KEY_free(ec_privKey);
 		EC_POINT_free(ec_publicKey);
+		if (sharedKeyLen <= 16 || sharedKeyLen > sizeof(sharedKey))
+			return false;
 
 		NCrypto::CHash160 sharedKeySHA1;
 		NCrypto::GenerateHashSHA1(sharedKey, sharedKeyLen, sharedKeySHA1);
@@ -484,17 +485,23 @@ namespace NCrypto
 
 	void ECCPrivKey::setPrivateKey(EC_KEY* key)
 	{
-		const BIGNUM* bnPrivKey = EC_KEY_get0_private_key(key);
 		memset(this->keyData, 0, sizeof(this->keyData));
-		BN_bn2binpad(bnPrivKey, this->keyData, sizeof(this->keyData));
+		const BIGNUM* bnPrivKey = EC_KEY_get0_private_key(key);
+		if (bnPrivKey)
+			BN_bn2binpad(bnPrivKey, this->keyData, sizeof(this->keyData));
 	}
 
 	EC_KEY* ECCPrivKey::getPrivateKey() const
 	{
-		BIGNUM* bn_privKey = BN_new();
-		BN_bin2bn(this->keyData, sizeof(this->keyData), bn_privKey);
+		BIGNUM* bn_privKey = BN_bin2bn(this->keyData, sizeof(this->keyData), nullptr);
+		if (!bn_privKey)
+			return nullptr;
 		EC_KEY* ec_privKey = EC_KEY_new_by_curve_name(NID_sect233r1);
-		EC_KEY_set_private_key(ec_privKey, bn_privKey);
+		if (!ec_privKey || EC_KEY_set_private_key(ec_privKey, bn_privKey) != 1)
+		{
+			EC_KEY_free(ec_privKey);
+			ec_privKey = nullptr;
+		}
 		BN_free(bn_privKey);
 		return ec_privKey;
 	}
@@ -510,13 +517,21 @@ namespace NCrypto
 
 	EC_KEY* ECCPubKey::getPublicKey()
 	{
-		BIGNUM* bn_x = BN_new();
-		BIGNUM* bn_y = BN_new();
-		BN_bin2bn(this->x, sizeof(this->x), bn_x);
-		BN_bin2bn(this->y, sizeof(this->y), bn_y);
+		BIGNUM* bn_x = BN_bin2bn(this->x, sizeof(this->x), nullptr);
+		BIGNUM* bn_y = BN_bin2bn(this->y, sizeof(this->y), nullptr);
+		if (!bn_x || !bn_y)
+		{
+			BN_free(bn_x);
+			BN_free(bn_y);
+			return nullptr;
+		}
 
 		EC_KEY* ec_pubKey = EC_KEY_new_by_curve_name(NID_sect233r1);
-		int r = EC_KEY_set_public_key_affine_coordinates(ec_pubKey, bn_x, bn_y);
+		if (!ec_pubKey || EC_KEY_set_public_key_affine_coordinates(ec_pubKey, bn_x, bn_y) != 1)
+		{
+			EC_KEY_free(ec_pubKey);
+			ec_pubKey = nullptr;
+		}
 
 		BN_free(bn_x);
 		BN_free(bn_y);
@@ -527,13 +542,15 @@ namespace NCrypto
 	EC_POINT* ECCPubKey::getPublicKeyAsPoint()
 	{
 		BN_CTX* ctx = BN_CTX_new();
-		BIGNUM* bn_x = BN_new();
-		BIGNUM* bn_y = BN_new();
-		BN_bin2bn(this->x, sizeof(this->x), bn_x);
-		BN_bin2bn(this->y, sizeof(this->y), bn_y);
+		BIGNUM* bn_x = BN_bin2bn(this->x, sizeof(this->x), nullptr);
+		BIGNUM* bn_y = BN_bin2bn(this->y, sizeof(this->y), nullptr);
 		EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_sect233r1);
-		EC_POINT* pubkey = EC_POINT_new(group);
-		EC_POINT_set_affine_coordinates(group, pubkey, bn_x, bn_y, ctx);
+		EC_POINT* pubkey = group ? EC_POINT_new(group) : nullptr;
+		if (!ctx || !bn_x || !bn_y || !pubkey || EC_POINT_set_affine_coordinates(group, pubkey, bn_x, bn_y, ctx) != 1)
+		{
+			EC_POINT_free(pubkey);
+			pubkey = nullptr;
+		}
 		EC_GROUP_free(group);
 		BN_CTX_free(ctx);
 		BN_free(bn_x);
@@ -543,24 +560,25 @@ namespace NCrypto
 
 	ECCPubKey ECCPubKey::generateFromPrivateKey(ECCPrivKey& privKey)
 	{
-		BIGNUM* bn_privKey = BN_new();
-		BN_bin2bn(privKey.keyData, sizeof(privKey.keyData), bn_privKey);
+		ECCPubKey genPubKey{};
+		BIGNUM* bn_privKey = BN_bin2bn(privKey.keyData, sizeof(privKey.keyData), nullptr);
 
 		// gen public key from private key
 		EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_sect233r1);
-		EC_POINT* pubkey = EC_POINT_new(group);
-		EC_POINT_mul(group, pubkey, bn_privKey, NULL, NULL, NULL);
+		EC_POINT* pubkey = group ? EC_POINT_new(group) : nullptr;
 		BIGNUM* bn_x = BN_new();
 		BIGNUM* bn_y = BN_new();
-		EC_POINT_get_affine_coordinates(group, pubkey, bn_x, bn_y, NULL);
+		if (bn_privKey && pubkey && bn_x && bn_y &&
+			EC_POINT_mul(group, pubkey, bn_privKey, nullptr, nullptr, nullptr) == 1 &&
+			EC_POINT_get_affine_coordinates(group, pubkey, bn_x, bn_y, nullptr) == 1)
+		{
+			BN_bn2binpad(bn_x, genPubKey.x, sizeof(genPubKey.x));
+			BN_bn2binpad(bn_y, genPubKey.y, sizeof(genPubKey.y));
+		}
 
-		// store public key
-		ECCPubKey genPubKey;
-		BN_bn2binpad(bn_x, genPubKey.x, sizeof(genPubKey.x));
-		BN_bn2binpad(bn_y, genPubKey.y, sizeof(genPubKey.y));
-	
 		// clean up and return
 		EC_POINT_free(pubkey);
+		EC_GROUP_free(group);
 		BN_free(bn_y);
 		BN_free(bn_x);
 		BN_free(bn_privKey);
@@ -572,29 +590,41 @@ namespace NCrypto
 
 	ECDSA_SIG* ECCSig::getSignature()
 	{
-		BIGNUM* bn_r = BN_new();
-		BIGNUM* bn_s = BN_new();
-		BN_bin2bn(this->r, 30, bn_r);
-		BN_bin2bn(this->s, 30, bn_s);
+		BIGNUM* bn_r = BN_bin2bn(this->r, 30, nullptr);
+		BIGNUM* bn_s = BN_bin2bn(this->s, 30, nullptr);
+		if (!bn_r || !bn_s)
+		{
+			BN_free(bn_r);
+			BN_free(bn_s);
+			return nullptr;
+		}
 
 		ECDSA_SIG* ec_sig = ECDSA_SIG_new();
-		ECDSA_SIG_set0(ec_sig, bn_r, bn_s); // ownership of bn_r and bn_s transferred to SIG as well, do not free manually
+		if (!ec_sig || ECDSA_SIG_set0(ec_sig, bn_r, bn_s) != 1)
+		{
+			ECDSA_SIG_free(ec_sig);
+			BN_free(bn_r);
+			BN_free(bn_s);
+			return nullptr;
+		}
 
 		return ec_sig;
 	}
 
 	void ECCSig::setSignature(ECDSA_SIG* sig)
 	{
+		memset(this->r, 0, sizeof(this->r));
+		memset(this->s, 0, sizeof(this->s));
 		const BIGNUM* sig_r = nullptr, * sig_s = nullptr;
 		ECDSA_SIG_get0(sig, &sig_r, &sig_s);
+		if (!sig_r || !sig_s)
+			return;
 
 		sint32 lenR = BN_num_bytes(sig_r);
 		sint32 lenS = BN_num_bytes(sig_s);
 		cemu_assert_debug(lenR <= 30);
 		cemu_assert_debug(lenS <= 30);
 
-		memset(this->r, 0, sizeof(this->r));
-		memset(this->s, 0, sizeof(this->s));
 		BN_bn2binpad(sig_r, this->r, 30);
 		BN_bn2binpad(sig_s, this->s, 30);
 	}
@@ -633,6 +663,7 @@ namespace NCrypto
 
 	void CertECC::sign(ECCPrivKey& signerPrivKey)
 	{
+		memset(&this->signature, 0, sizeof(this->signature));
 		uint8 hash[SHA256_DIGEST_LENGTH];
 		SHA256((const unsigned char *) this->issuer, 0x100, hash);
 
@@ -640,6 +671,8 @@ namespace NCrypto
 		EC_KEY* ec_privKey = signerPrivKey.getPrivateKey();
 		ECDSA_SIG* sig = ECDSA_do_sign(hash, sizeof(hash), ec_privKey);
 		EC_KEY_free(ec_privKey);
+		if (!sig)
+			return;
 
 		// store signature
 		const BIGNUM* bn_r = nullptr, *bn_s = nullptr;
@@ -687,9 +720,15 @@ namespace NCrypto
 
 	ECCSig signHash(uint32 signerTitleIdHigh, uint32 signerTitleIdLow, uint8* hash, sint32 hashLen, CertECC& certChainOut)
 	{
+		ECCSig eccSig{};
+		certChainOut = {};
 		// generate key pair (we only care about the private key)
 		EC_KEY* ec_keyPair = EC_KEY_new_by_curve_name(NID_sect233r1);
-		EC_KEY_generate_key(ec_keyPair);
+		if (!ec_keyPair || EC_KEY_generate_key(ec_keyPair) != 1)
+		{
+			EC_KEY_free(ec_keyPair);
+			return eccSig;
+		}
 
 		ECCPrivKey privKey;
 		privKey.setPrivateKey(ec_keyPair);
@@ -706,15 +745,20 @@ namespace NCrypto
 		EC_KEY* ec_privKey = privKey.getPrivateKey();
 		ECDSA_SIG* sig = ECDSA_do_sign(hash, hashLen, ec_privKey);
 		EC_KEY_free(ec_privKey);
+		if (!sig)
+			return eccSig;
 
 		// verify
 		EC_KEY* ec_pubKey = pubKey.getPublicKey();
-		bool isValid = ECDSA_do_verify(hash, hashLen, sig, ec_pubKey) == 1;
+		const bool isValid = ECDSA_do_verify(hash, hashLen, sig, ec_pubKey) == 1;
 		EC_KEY_free(ec_pubKey);
-		cemu_assert(isValid);
+		if (!isValid)
+		{
+			ECDSA_SIG_free(sig);
+			return eccSig;
+		}
 
 		// store signature
-		ECCSig eccSig;
 		const BIGNUM* bn_r = nullptr, * bn_s = nullptr;
 		ECDSA_SIG_get0(sig, &bn_r, &bn_s);
 		BN_bn2binpad(bn_r, eccSig.r, sizeof(eccSig.r));

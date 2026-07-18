@@ -645,6 +645,25 @@ else()
 	set(glslang_target "glslang::glslang")
 endif()
 
+if (PLATFORM_SWITCH)
+	target_sources(CemuCafe PRIVATE OS/libs/h264_avc/H264DecBackendFFmpeg.cpp)
+	target_link_libraries(CemuCafe PRIVATE
+		CemuCommon
+		CemuGui
+		ZArchive::zarchive
+		imguiImpl
+		pugixml::pugixml
+		ZLIB::ZLIB
+		ih264d
+		zstd::zstd
+		${glslang_target}
+		OpenSSL::SSL
+		CURL::libcurl
+		FFmpeg::avcodec
+		PUBLIC
+		SwitchVulkanDriver
+	)
+else()
 target_link_libraries(CemuCafe PRIVATE
 	CemuCommon
   CemuGui
@@ -659,6 +678,7 @@ target_link_libraries(CemuCafe PRIVATE
   PUBLIC
   OpenSSL::SSL
 )
+endif()
 
 if (ENABLE_WAYLAND)
 	# PUBLIC because wayland-client.h is included in VulkanAPI.h

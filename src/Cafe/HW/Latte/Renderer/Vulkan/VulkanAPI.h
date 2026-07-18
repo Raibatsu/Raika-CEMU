@@ -5,7 +5,18 @@
 #define VK_USE_PLATFORM_WIN32_KHR // todo - define in CMakeLists.txt
 #endif
 
+#if defined(__SWITCH__)
+#ifndef VK_USE_PLATFORM_VI_NN
+#define VK_USE_PLATFORM_VI_NN
+#endif
+#endif
+
 #include <vulkan/vulkan.h>
+
+#if defined(__SWITCH__)
+// Entry point for the statically linked NVK ICD.
+extern "C" PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName);
+#endif
 
 bool InitializeGlobalVulkan();
 bool InitializeInstanceVulkan(VkInstance instance);
@@ -26,6 +37,8 @@ extern bool g_vulkan_available;
 	#if defined(VKFUNC_INIT)
 		#if BOOST_OS_WINDOWS
 		#define VKFUNC(__FUNC__) __FUNC__ = (PFN_##__FUNC__)GetProcAddress(hmodule, #__FUNC__)
+		#elif defined(__SWITCH__)
+		#define VKFUNC(__FUNC__) __FUNC__ = (PFN_##__FUNC__)vk_icdGetInstanceProcAddr(nullptr, #__FUNC__)
 		#else
 		#define VKFUNC(__FUNC__) __FUNC__ = (PFN_##__FUNC__)dlsym(vulkan_so, #__FUNC__)
 		#endif
@@ -51,14 +64,14 @@ extern bool g_vulkan_available;
 // global functions
 VKFUNC(vkGetInstanceProcAddr);
 VKFUNC(vkCreateInstance);
-VKFUNC(vkGetDeviceProcAddr);
 VKFUNC(vkEnumerateInstanceExtensionProperties);
-VKFUNC(vkEnumerateDeviceExtensionProperties);
 VKFUNC(vkEnumerateInstanceVersion);
 
 // instance functions
 VKFUNC_INSTANCE(vkDestroyInstance);
 VKFUNC_INSTANCE(vkEnumeratePhysicalDevices);
+VKFUNC_INSTANCE(vkGetDeviceProcAddr);
+VKFUNC_INSTANCE(vkEnumerateDeviceExtensionProperties);
 VKFUNC_INSTANCE(vkCreateDevice);
 VKFUNC_INSTANCE(vkDestroyDevice);
 VKFUNC_INSTANCE(vkDeviceWaitIdle);
@@ -144,6 +157,10 @@ VKFUNC_INSTANCE(vkCreateWin32SurfaceKHR);
 
 #if BOOST_OS_MACOS
 VKFUNC_INSTANCE(vkCreateMetalSurfaceEXT);
+#endif
+
+#if defined(__SWITCH__)
+VKFUNC_INSTANCE(vkCreateViSurfaceNN);
 #endif
 
 VKFUNC_INSTANCE(vkDestroySurfaceKHR);

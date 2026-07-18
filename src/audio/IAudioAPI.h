@@ -45,6 +45,7 @@ public:
 		XAudio27,
 		XAudio2,
 		Cubeb,
+		SwitchAudio,
 
 		AudioAPIEnd,
 	};

@@ -18,6 +18,7 @@
 #include "Cafe/OS/libs/coreinit/coreinit_MEM.h"
 
 #include "util/helpers/ConcurrentQueue.h"
+#include "util/helpers/ThreadHelpers.h"
 #include "Cafe/OS/common/PPCConcurrentQueue.h"
 #include "Common/FileStream.h"
 #include "config/ActiveSettings.h"
@@ -320,8 +321,7 @@ uint32 SendOrderToWorker(CURL_t* curl, QueueOrder order, uint32 arg1 = 0)
 
 	PPCConcurrentQueue<QueueMsg_t> callerQueue;
 	ConcurrentQueue<QueueMsg_t> threadQueue;
-	std::thread worker(CurlWorkerThread, curl, &callerQueue, &threadQueue);
-	worker.detach();
+	cemuCreateDetachedThread(CurlWorkerThread, curl, &callerQueue, &threadQueue);
 
 	QueueMsg_t orderMsg = {};
 	orderMsg.order = order;
@@ -670,7 +670,7 @@ void export_curl_multi_fdset(PPCInterpreter_t* hCPU)
 		}
 	};
 
-#if BOOST_OS_UNIX
+#if BOOST_OS_UNIX || defined(__SWITCH__)
 	for (int s = 0; s < h_maxFd + 1; s++) 
 	{
 		if(FD_ISSET(s, &h_readFd))

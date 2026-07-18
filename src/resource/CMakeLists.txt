@@ -12,9 +12,12 @@ embedded/resources.cpp
 embedded/resources.h
 )
 
-if(UNIX)
+if(UNIX OR PLATFORM_SWITCH)
     if(NOT APPLE)
         target_sources(CemuResource PRIVATE embedded/fontawesome.S)
+        # .incbin resolves through assembler include paths.
+        set_property(SOURCE embedded/fontawesome.S APPEND PROPERTY COMPILE_OPTIONS
+            "-I${CMAKE_CURRENT_SOURCE_DIR}/embedded")
     else()
         target_sources(CemuResource PRIVATE embedded/fontawesome_macos.S)
     endif()

@@ -145,6 +145,8 @@ void SetThreadName(const char* name)
 #endif
 #elif BOOST_OS_MACOS
 	pthread_setname_np(name);
+#elif defined(__SWITCH__)
+	(void)name;
 #else
 	if(std::strlen(name) > 15)
 		cemuLog_log(LogType::Force, "Truncating thread name {} because it was longer than 15 characters", name);

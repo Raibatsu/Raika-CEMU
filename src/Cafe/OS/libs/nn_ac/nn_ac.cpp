@@ -8,6 +8,10 @@
 #elif BOOST_OS_LINUX
 #include <ifaddrs.h>
 #include <net/if.h>
+#elif defined(__SWITCH__)
+extern "C" {
+#include <switch/services/nifm.h>
+}
 #endif
 
 // AC lib (manages internet connection)
@@ -19,6 +23,22 @@ enum class AC_STATUS : uint32
 };
 
 static_assert(TRUE == 1, "TRUE not 1");
+
+bool _IsHostNetworkConnected()
+{
+#if defined(__SWITCH__)
+	NifmInternetConnectionType type{};
+	NifmInternetConnectionStatus status{};
+	u32 strength = 0;
+	if (R_FAILED(nifmInitialize(NifmServiceType_User)))
+		return false;
+	const Result result = nifmGetInternetConnectionStatus(&type, &strength, &status);
+	nifmExit();
+	return R_SUCCEEDED(result) && status == NifmInternetConnectionStatus_Connected;
+#else
+	return true;
+#endif
+}
 
 void _GetLocalIPAndSubnetMaskFallback(uint32& localIp, uint32& subnetMask)
 {
@@ -118,6 +138,28 @@ void _GetLocalIPAndSubnetMask(uint32& localIp, uint32& subnetMask)
 	cemuLog_logDebug(LogType::Force, "_GetLocalIPAndSubnetMask(): Failed to find network IP and subnet mask");
 	_GetLocalIPAndSubnetMaskFallback(localIp, subnetMask);
 }
+#elif defined(__SWITCH__)
+void _GetLocalIPAndSubnetMask(uint32& localIp, uint32& subnetMask)
+{
+	u32 address = 0;
+	u32 mask = 0;
+	u32 gateway = 0;
+	u32 primaryDns = 0;
+	u32 secondaryDns = 0;
+	if (R_SUCCEEDED(nifmInitialize(NifmServiceType_User)))
+	{
+		const Result result = nifmGetCurrentIpConfigInfo(&address, &mask, &gateway, &primaryDns, &secondaryDns);
+		nifmExit();
+		if (R_SUCCEEDED(result))
+		{
+			localIp = ntohl(address);
+			subnetMask = ntohl(mask);
+			return;
+		}
+	}
+	localIp = 0;
+	subnetMask = 0;
+}
 #else
 void _GetLocalIPAndSubnetMask(uint32& localIp, uint32& subnetMask)
 {
@@ -175,9 +217,8 @@ void nnAcExport_IsSystemConnected(PPCInterpreter_t* hCPU)
 	ppcDefineParamTypePtr(isConnectedOut, uint8, 0);
 	ppcDefineParamTypePtr(apTypeOut, uint32be, 1);
 
-	cemuLog_logDebug(LogType::Force, "nn_ac.IsSystemConnected() - placeholder");
 	*apTypeOut = 0; // ukn
-	*isConnectedOut = 1;
+	*isConnectedOut = _IsHostNetworkConnected();
 
 	osLib_returnFromFunction(hCPU, 0);
 }
@@ -209,7 +250,7 @@ namespace nn_ac
 	nnResult IsApplicationConnected(uint8be* connected)
 	{
 		if (connected)
-			*connected = TRUE;
+			*connected = _IsHostNetworkConnected();
 		return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
 	}
 
@@ -225,7 +266,7 @@ namespace nn_ac
 	nnResult GetConnectStatus(betype<AC_STATUS>* status)
 	{
 		if (status)
-			*status = AC_STATUS::OK;
+			*status = _IsHostNetworkConnected() ? AC_STATUS::OK : AC_STATUS::FAILED;
 		return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
 	}
 

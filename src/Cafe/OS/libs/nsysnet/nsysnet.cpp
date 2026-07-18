@@ -7,7 +7,7 @@
 
 #include "Common/socket.h"
 
-#if BOOST_OS_UNIX
+#if BOOST_OS_UNIX || defined(__SWITCH__)
 #include <netinet/tcp.h>
 #endif
 
@@ -1083,7 +1083,7 @@ void _translateFDSet(fd_set* hostSet, struct wu_fd_set* fdset, sint32 nfds, int 
 	if (fdset == NULL)
 		return;
 
-#if BOOST_OS_UNIX
+#if BOOST_OS_UNIX || defined(__SWITCH__)
 	int maxfd;
 	if(hostnfds)
 		maxfd = *hostnfds;
@@ -1101,7 +1101,7 @@ void _translateFDSet(fd_set* hostSet, struct wu_fd_set* fdset, sint32 nfds, int 
 		if(vs == NULL)
 			continue; // socket invalid
 
-#if BOOST_OS_UNIX
+#if BOOST_OS_UNIX || defined(__SWITCH__)
 		if(vs->s > maxfd)
 			maxfd = vs->s;
 #endif
@@ -1109,7 +1109,7 @@ void _translateFDSet(fd_set* hostSet, struct wu_fd_set* fdset, sint32 nfds, int 
 		FD_SET(vs->s, hostSet);
 	}
 
-#if BOOST_OS_UNIX
+#if BOOST_OS_UNIX || defined(__SWITCH__)
 	if(hostnfds)
 		*hostnfds = maxfd;
 #endif
@@ -1620,7 +1620,7 @@ void nsysnetExport_recvfrom(PPCInterpreter_t* hCPU)
 		t.tv_sec = 0;
 		t.tv_usec = 0;
 		int nfds = 0;
-#if BOOST_OS_UNIX
+#if BOOST_OS_UNIX || defined(__SWITCH__)
 		nfds = vs->s + 1;
 #endif
 		sint32 count = select(nfds, &fd_read, NULL, &fd_exceptions, &t);
@@ -1775,7 +1775,7 @@ void nsysnetExport_recvfrom_ex(PPCInterpreter_t* hCPU)
 		t.tv_sec = 0;
 		t.tv_usec = 0;
 		int nfds = 0;
-#if BOOST_OS_UNIX
+#if BOOST_OS_UNIX || defined(__SWITCH__)
 		nfds = vs->s + 1;
 #endif
 		sint32 count = select(nfds, &fd_read, NULL, &fd_exceptions, &t);

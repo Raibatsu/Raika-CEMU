@@ -46,6 +46,33 @@ void CafeTitleList::Initialize(const fs::path cacheXmlFile)
 	LoadCacheFile();
 }
 
+void CafeTitleList::Shutdown()
+{
+	if (sTLRefreshWorker.joinable())
+		sTLRefreshWorker.join();
+
+	if (sTLCacheDirty)
+	{
+		StoreCacheFile();
+		sTLCacheDirty = false;
+	}
+
+	std::unique_lock lock(sTLMutex);
+	for (TitleInfo* title : sTLList)
+		delete title;
+	sTLList.clear();
+	sTLListPending.clear();
+	sTLMap.clear();
+	sTLCallbackList.clear();
+	sTLScanPaths.clear();
+	sTLMLCPath.clear();
+	sTLCacheFilePath.clear();
+	sTLRefreshRequests.store(0);
+	sTLRefreshWorkerActive = false;
+	sTLIsScanMandatory = false;
+	sTLInitialized = false;
+}
+
 void CafeTitleList::LoadCacheFile()
 {
 	sTLIsScanMandatory = true;
@@ -174,9 +201,13 @@ void CafeTitleList::Refresh()
 	sTLRefreshRequests++;
 	if (!sTLRefreshWorkerActive)
 	{
-		if (sTLRefreshWorker.joinable())
-			sTLRefreshWorker.join();
 		sTLRefreshWorkerActive = true;
+		if (sTLRefreshWorker.joinable())
+		{
+			_lock.unlock();
+			sTLRefreshWorker.join();
+			_lock.lock();
+		}
 		sTLRefreshWorker = std::thread(RefreshWorkerThread);
 	}
 	sTLIsScanMandatory = false;
@@ -271,22 +302,40 @@ bool CafeTitleList::RefreshWorkerThread()
 		// at the end of scanning, we can then use this list to identify and remove any titles that are no longer discoverable
 		sTLListPending = sTLList;
 		sTLMutex.unlock();
-		// scan game paths
-		for (auto& it : gamePaths)
-			ScanGamePath(it);
-		// scan MLC
-		if (!mlcPath.empty())
+#if defined(__SWITCH__)
+		bool scanCompleted = false;
+		try
 		{
-			std::error_code ec;
-			for (auto& it : fs::directory_iterator(mlcPath / "usr/title", ec))
+#endif
+			// scan game paths
+			for (auto& it : gamePaths)
+				ScanGamePath(it);
+			// scan MLC
+			if (!mlcPath.empty())
 			{
-				if (!it.is_directory(ec))
-					continue;
-				ScanMLCPath(it.path());
+				std::error_code ec;
+				for (auto& it : fs::directory_iterator(mlcPath / "usr/title", ec))
+				{
+					if (!it.is_directory(ec))
+						continue;
+					ScanMLCPath(it.path());
+				}
+				ScanMLCPath(mlcPath / "sys/title/00050010");
+				ScanMLCPath(mlcPath / "sys/title/00050030");
 			}
-			ScanMLCPath(mlcPath / "sys/title/00050010");
-			ScanMLCPath(mlcPath / "sys/title/00050030");
+#if defined(__SWITCH__)
+			scanCompleted = true;
 		}
+		catch (...)
+		{
+		}
+		if (!scanCompleted)
+		{
+			// Keep cached entries when an incomplete scan cannot prove they were removed.
+			sTLListPending.clear();
+			continue;
+		}
+#endif
 
 		// remove any titles that are still pending
 		for (auto& itPending : sTLListPending)
@@ -354,8 +403,13 @@ void CafeTitleList::ScanGamePath(const fs::path& path)
 	std::vector<fs::path> dirsInDirectory;
 	bool hasContentFolder = false, hasCodeFolder = false, hasMetaFolder = false;
 	std::error_code ec;
-	for (auto& it : fs::directory_iterator(path, ec))
-	{		
+	fs::directory_iterator dirIt(path, ec);
+	if (ec)
+	{
+		return;
+	}
+	for (auto& it : dirIt)
+	{
 		if (it.is_regular_file(ec))
 		{
 			filesInDirectory.emplace_back(it.path());
@@ -417,7 +471,7 @@ void CafeTitleList::ScanMLCPath(const fs::path& path)
 	std::error_code ec;
 	for (auto& it : fs::directory_iterator(path, ec))
 	{
-		if (!it.is_directory())
+		if (!it.is_directory(ec))
 			continue;
 		// only scan directories which match the title id naming scheme
 		std::string dirName = _pathToUtf8(it.path().filename());

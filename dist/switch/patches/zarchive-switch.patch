@@ -1,0 +1,26 @@
+diff --git a/src/zarchivereader.cpp b/src/zarchivereader.cpp
+--- a/src/zarchivereader.cpp
++++ b/src/zarchivereader.cpp
+@@ -8,12 +8,15 @@
+ 
+ static uint64_t _ifstream_getFileSize(std::ifstream& file)
+ {
++	// newlib keeps EOF state across seeks.
++	file.clear();
+ 	file.seekg(0, std::ios_base::end);
+ 	return (uint64_t)file.tellg();
+ }
+ 
+ static bool _ifstream_readBytes(std::ifstream& file, uint64_t offset, void* buffer, uint32_t size)
+ {
++	file.clear();
+ 	file.seekg(offset, std::ios_base::beg);
+ 	file.read((char*)buffer, size);
+ 	return file.gcount() == size;
+@@ -368,4 +371,4 @@ std::string_view ZArchiveReader::GetName(const std::vector<uint8_t>& nameTable,
+ 	if ((nameOffset + (uint32_t)nameLength) > nameTable.size())
+ 		return "";
+ 	return std::basic_string_view<char>((char*)nameTable.data() + nameOffset, nameLength);
+-}
+\ No newline at end of file
++}

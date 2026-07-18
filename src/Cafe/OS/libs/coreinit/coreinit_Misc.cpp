@@ -5,6 +5,7 @@
 #include "Cafe/CafeSystem.h"
 #include "Cafe/Filesystem/fsc.h"
 #include "config/LaunchSettings.h"
+#include "util/helpers/ThreadHelpers.h"
 #include <pugixml.hpp>
 
 namespace coreinit
@@ -739,8 +740,7 @@ namespace coreinit
 			argArray.emplace_back(argv[i]);
 		CafeSystem::SetOverrideArgs(argArray);
 		// spawn launcher thread (this current thread will be destroyed during relaunch)
-		std::thread launcherThread(OSLauncherThread, titleId);
-		launcherThread.detach();
+		cemuCreateDetachedThread(OSLauncherThread, titleId);
 		// suspend this thread
 		coreinit::OSSuspendThread(coreinit::OSGetCurrentThread());
 		return 0;
@@ -860,8 +860,7 @@ namespace coreinit
 	void __PPCExit(sint32 status)
 	{
 		// spawn shutdown thread (the current thread has to be destroyed as part of the shutdown process)
-		std::thread shutdownThread(OSShutdownThread, status);
-		shutdownThread.detach();
+		cemuCreateDetachedThread(OSShutdownThread, status);
 		// suspend this thread
 		coreinit::OSSuspendThread(coreinit::OSGetCurrentThread());
 	}

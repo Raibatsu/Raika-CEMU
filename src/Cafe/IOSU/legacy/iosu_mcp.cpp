@@ -6,6 +6,7 @@
 #include "config/CemuConfig.h"
 #include "Cafe/TitleList/GameInfo.h"
 #include "util/helpers/helpers.h"
+#include "util/helpers/ThreadHelpers.h"
 #include "Cafe/TitleList/TitleList.h"
 #include "Cafe/CafeSystem.h"
 #include "Cafe/IOSU/iosu_ipc_common.h"
@@ -151,8 +152,7 @@ namespace iosu
 	{
 		if (iosuMcp.isInitialized)
 			return;
-		std::thread t(iosuMcp_thread);
-		t.detach();
+		cemuCreateDetachedThread(iosuMcp_thread);
 		iosuMcp.isInitialized = true;
 	}
 

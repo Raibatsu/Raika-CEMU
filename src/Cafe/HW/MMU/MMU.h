@@ -194,6 +194,10 @@ bool memory_isAddressRangeAccessible(MPTR virtualAddress, uint32 size);
 #define CPU_swapEndianU32(_v) bswap32((uint32)(_v))
 #define CPU_swapEndianU16(_v) bswap16((uint16)(_v))
 #endif
+#elif defined(__SWITCH__)
+#define CPU_swapEndianU64(_v) __builtin_bswap64((uint64)(_v))
+#define CPU_swapEndianU32(_v) __builtin_bswap32((uint32)(_v))
+#define CPU_swapEndianU16(_v) __builtin_bswap16((uint16)(_v))
 #endif
 
 // C-style memory access, deprecated. Use memory_read<> and memory_write<> templates instead

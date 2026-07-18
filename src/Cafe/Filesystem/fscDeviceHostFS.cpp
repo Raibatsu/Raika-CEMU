@@ -232,14 +232,14 @@ public:
 	bool fscDeviceCreateDir(std::string_view path, void* ctx, sint32* fscStatus) override
 	{
 		fs::path dirPath = _utf8ToPath(path);
-		if (fs::exists(dirPath))
+		std::error_code ec;
+		if (fs::exists(dirPath, ec))
 		{
-			if (!fs::is_directory(dirPath))
+			if (!fs::is_directory(dirPath, ec))
 				cemuLog_log(LogType::Force, "CreateDir: {} already exists but is not a directory", path);
 			*fscStatus = FSC_STATUS_ALREADY_EXISTS;
 			return false;
 		}
-		std::error_code ec;
 		bool r = fs::create_directories(dirPath, ec);
 		if (!r)
 			cemuLog_log(LogType::Force, "CreateDir: Failed to create {}", path);

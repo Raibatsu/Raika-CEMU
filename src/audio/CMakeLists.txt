@@ -30,6 +30,13 @@ if(ENABLE_CUBEB)
 	#add_compile_definitions(HAS_CUBEB)
 endif()
 
+if(PLATFORM_SWITCH)
+	target_sources(CemuAudio PRIVATE
+		SwitchAudioAPI.h
+		${CMAKE_SOURCE_DIR}/src/platform/switch/SwitchAudioAPI.cpp
+	)
+endif()
+
 target_include_directories(CemuAudio PUBLIC "../")
 
 target_link_libraries(CemuAudio PRIVATE

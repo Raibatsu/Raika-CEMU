@@ -1,3 +1,4 @@
+#include "util/helpers/ThreadHelpers.h"
 
 struct PPCInterpreterLLEContext_t
 {
@@ -213,7 +214,7 @@ void PPCCoreLLE_startSingleCoreScheduler(uint32 entrypoint)
 	cpuContext->cores[1].instructionPointer = 0xFFF00100;
 	cpuContext->cores[2].instructionPointer = 0xFFF00100;
 	// todo - calculate instruction pointer when core 1/2 is enabled (because entry point is determined by MSR exception vector bit)
-	std::thread(smdpArea_thread).detach();
+	cemuCreateDetachedThread(smdpArea_thread);
 
 	while (true)
 	{

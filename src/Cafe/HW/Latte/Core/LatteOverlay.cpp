@@ -15,6 +15,10 @@
 
 #include <cinttypes>
 
+#if defined(__SWITCH__)
+#include "platform/switch/SwitchOverlay.h"
+#endif
+
 struct OverlayStats
 {
 	OverlayStats() {};
@@ -516,6 +520,10 @@ void LatteOverlay_translateScreenPosition(ScreenPosition pos, const Vector2f& wi
 
 void LatteOverlay_render(bool pad_view)
 {
+#if defined(__SWITCH__)
+	SwitchOverlay_Render();
+#endif
+
 	const auto& config = GetConfig();
 	if(config.overlay.position == ScreenPosition::kDisabled && config.notification.position == ScreenPosition::kDisabled)
 		return;

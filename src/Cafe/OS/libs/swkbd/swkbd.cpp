@@ -8,6 +8,10 @@
 #include "util/helpers/helpers.h"
 #include "resource/IconsFontAwesome5.h"
 
+#if defined(__SWITCH__)
+#include "platform/switch/SwitchSwkbd.h"
+#endif
+
 #define SWKBD_FORM_STRING_MAX_LENGTH	(4096) // counted in 16-bit characters
 
 #define SWKBD_STATE_BLANK				(0)	// not visible
@@ -190,6 +194,38 @@ typedef struct
 
 static_assert(offsetof(swkbdAppearArg_t, cursorIndex) == 0xC4, "appearArg.cursorIndex has invalid offset");
 
+#if defined(__SWITCH__)
+void swkbd_inputStringChanged();
+void swkbd_finishInput();
+
+static void swkbd_runNativeApplet(sint32 maxLength)
+{
+	maxLength = maxLength > 0 ? std::min(maxLength, SWKBD_FORM_STRING_MAX_LENGTH - 1)
+	                         : SWKBD_FORM_STRING_MAX_LENGTH - 1;
+	char16_t initial[SWKBD_FORM_STRING_MAX_LENGTH];
+	const sint32 initialLength = std::min(swkbdInternalState->formStringLength,
+	                                     SWKBD_FORM_STRING_MAX_LENGTH - 1);
+	for (sint32 index = 0; index < initialLength; ++index)
+		initial[index] = static_cast<char16_t>(static_cast<uint16>(swkbdInternalState->formStringBuffer[index]));
+	initial[initialLength] = 0;
+
+	char16_t output[SWKBD_FORM_STRING_MAX_LENGTH];
+	if (!SwitchSwkbd_Show(initial, maxLength, output, std::size(output)))
+		return;
+
+	sint32 length = 0;
+	while (length < SWKBD_FORM_STRING_MAX_LENGTH - 1 && output[length])
+	{
+		swkbdInternalState->formStringBuffer[length] = static_cast<wchar_t>(output[length]);
+		++length;
+	}
+	swkbdInternalState->formStringBuffer[length] = L'\0';
+	swkbdInternalState->formStringLength = length;
+	swkbd_inputStringChanged();
+	swkbd_finishInput();
+}
+#endif
+
 uint32 SwkbdAppearInputForm(const swkbdAppearArg_t* appearArg)
 {
 	swkbdInternalState->formStringLength = 0;
@@ -222,6 +258,9 @@ uint32 SwkbdAppearInputForm(const swkbdAppearArg_t* appearArg)
 		swkbdInternalState->formStringBuffer[0] = '\0';
 		swkbdInternalState->formStringLength = 0;
 	}
+#if defined(__SWITCH__)
+	swkbd_runNativeApplet(swkbdInternalState->maxTextLength);
+#endif
 	return 1;
 }
 
@@ -241,6 +280,27 @@ uint32 SwkbdAppearKeyboard(const SwkbdKeyboardArg_t* keyboardArg)
 	swkbdInternalState->formStringBuffer[0] = '\0';
 	swkbdInternalState->formStringLength = 0;
 	swkbdInternalState->keyboardArg = *keyboardArg;
+#if defined(__SWITCH__)
+	const uint32 bufferSize = std::min<uint32>(
+		swkbdInternalState->keyboardArg.receiverArg.stringBufSize,
+		SWKBD_FORM_STRING_MAX_LENGTH);
+	auto* initial = swkbdInternalState->keyboardArg.receiverArg.stringBuf.GetPtr();
+	if (initial && bufferSize > 1)
+	{
+		sint32 length = 0;
+		const sint32 maxLength = static_cast<sint32>(bufferSize - 1);
+		while (length < maxLength && initial[length] != 0)
+		{
+			swkbdInternalState->formStringBuffer[length] =
+				static_cast<wchar_t>(static_cast<uint16>(initial[length]));
+			++length;
+		}
+		swkbdInternalState->formStringBuffer[length] = L'\0';
+		swkbdInternalState->formStringLength = length;
+	}
+	swkbd_runNativeApplet(bufferSize > 1 ? static_cast<sint32>(bufferSize - 1)
+	                                   : SWKBD_FORM_STRING_MAX_LENGTH - 1);
+#endif
 	return 1;
 }
 
@@ -399,6 +459,9 @@ void SwkbdCalc(void* controllerInfo)
 void swkbd_keyInput(uint32 keyCode);
 void swkbd_render(bool mainWindow)
 {
+#if defined(__SWITCH__)
+	return;
+#endif
 	// only render if active
 	if( swkbdInternalState == NULL || swkbdInternalState->isActive == false)
 		return;
@@ -578,37 +641,36 @@ SysAllocator<changeStringParam_t> _changeStringParam;
 
 void swkbd_inputStringChanged()
 {
-	if( true )//swkbdInternalState->keyboardOnlyMode )
+	const uint32 bufferSize = std::min<uint32>(
+		swkbdInternalState->keyboardArg.receiverArg.stringBufSize,
+		SWKBD_FORM_STRING_MAX_LENGTH);
+	auto* buffer = swkbdInternalState->keyboardArg.receiverArg.stringBuf.GetPtr();
+	if (buffer && bufferSize > 0)
 	{
 		// write changed string to application's string buffer
-		uint32 stringBufferSize = swkbdInternalState->keyboardArg.receiverArg.stringBufSize; // in 2-byte words
-		if( stringBufferSize > 1 )
-		{
-			stringBufferSize--; // don't count the null-termination character
-			const auto stringBufferBE = swkbdInternalState->keyboardArg.receiverArg.stringBuf.GetPtr();
-			sint32 copyLength = std::min((sint32)stringBufferSize, swkbdInternalState->formStringLength);
-			for(sint32 i=0; i<copyLength; i++)
-			{
-				stringBufferBE[i] = swkbdInternalState->formStringBuffer[i];
-			}
-			stringBufferBE[copyLength] = '\0';
-
-			//swkbdInternalState->keyboardArg.cursorPos = copyLength;
-		}
-		// IEventReceiver callback
-		if (swkbdInternalState->keyboardArg.receiverArg.IEventReceiver)
-		{
-			SwkbdIEventReceiver_t* eventReceiver = swkbdInternalState->keyboardArg.receiverArg.IEventReceiver.GetPtr();
-			MPTR cbChangeString = eventReceiver->vTable->changeString.GetMPTR();
-			if (cbChangeString)
-			{
-				changeStringParam_t* changeStringParam = _changeStringParam.GetPtr();
-				changeStringParam->beginIndex = 0;
-				changeStringParam->endIndex = 0;
-				coreinitAsyncCallback_add(cbChangeString, 2, memory_getVirtualOffsetFromPointer(eventReceiver), _changeStringParam.GetMPTR());
-			}
-		}
+		const uint32 formLength = static_cast<uint32>(
+			std::max(swkbdInternalState->formStringLength, 0));
+		const uint32 copyLength = std::min(bufferSize - 1, formLength);
+		for (uint32 index = 0; index < copyLength; ++index)
+			buffer[index] = swkbdInternalState->formStringBuffer[index];
+		buffer[copyLength] = 0;
 	}
+
+	// IEventReceiver callback
+	if (!swkbdInternalState->keyboardArg.receiverArg.IEventReceiver)
+		return;
+	SwkbdIEventReceiver_t* receiver =
+		swkbdInternalState->keyboardArg.receiverArg.IEventReceiver.GetPtr();
+	if (!receiver || !receiver->vTable)
+		return;
+	const MPTR callback = receiver->vTable->changeString.GetMPTR();
+	if (!callback)
+		return;
+	changeStringParam_t* parameter = _changeStringParam.GetPtr();
+	parameter->beginIndex = 0;
+	parameter->endIndex = 0;
+	coreinitAsyncCallback_add(callback, 2, memory_getVirtualOffsetFromPointer(receiver),
+	                          _changeStringParam.GetMPTR());
 }
 
 void swkbd_keyInput(uint32 keyCode)

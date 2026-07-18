@@ -18,6 +18,7 @@ class CafeSaveList
 {
 public:
 	static void Initialize();
+	static void Shutdown();
 	static void SetMLCPath(fs::path mlcPath);
 	static void Refresh();
 

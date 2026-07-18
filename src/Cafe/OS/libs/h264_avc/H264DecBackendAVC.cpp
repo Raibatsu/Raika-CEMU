@@ -179,7 +179,6 @@ namespace H264
 				// resolution change
 				ResetDecoder();
 				m_hasBufferSizeInfo = false;
-				cemuLog_log(LogType::H264, "H264: Resolution change detected");
 				Decode(decodedSlice);
 				return;
 			}
@@ -258,14 +257,13 @@ namespace H264
 		{
 			auto releaseDisplayFrame = [this](uint32 displayBufferId)
 			{
-				ivd_rel_display_frame_ip_t s_video_rel_disp_ip{ 0 };
-				ivd_rel_display_frame_op_t s_video_rel_disp_op{ 0 };
-				s_video_rel_disp_ip.e_cmd = IVD_CMD_REL_DISPLAY_FRAME;
-				s_video_rel_disp_ip.u4_size = sizeof(ivd_rel_display_frame_ip_t);
-				s_video_rel_disp_op.u4_size = sizeof(ivd_rel_display_frame_op_t);
-				s_video_rel_disp_ip.u4_disp_buf_id = displayBufferId;
-
-				WORD32 status = ih264d_api_function(m_codecCtx, &s_video_rel_disp_ip, &s_video_rel_disp_op);
+				ivd_rel_display_frame_ip_t releaseInput{0};
+				ivd_rel_display_frame_op_t releaseOutput{0};
+				releaseInput.e_cmd = IVD_CMD_REL_DISPLAY_FRAME;
+				releaseInput.u4_size = sizeof(releaseInput);
+				releaseInput.u4_disp_buf_id = displayBufferId;
+				releaseOutput.u4_size = sizeof(releaseOutput);
+				const WORD32 status = ih264d_api_function(m_codecCtx, &releaseInput, &releaseOutput);
 				cemu_assert(!status);
 			};
 
@@ -307,9 +305,8 @@ namespace H264
 				releaseDisplayFrame(s_dec_op.u4_disp_buf_id);
 			}
 
-			// release display buffers
-			for (size_t i = 0; i < m_displayBuf.size(); i++)
-				releaseDisplayFrame((uint32)i);
+			for (size_t index = 0; index < m_displayBuf.size(); ++index)
+				releaseDisplayFrame(static_cast<uint32>(index));
 		}
 
 		void CopyImageToResultBuffer(uint8* yIn, uint8* uvIn, uint8* bufOut, ivd_video_decode_op_t& decodeInfo)
@@ -385,7 +382,6 @@ namespace H264
 		{
 			ivd_ctl_getbufinfo_ip_t s_ctl_ip{ 0 };
 			ivd_ctl_getbufinfo_op_t s_ctl_op{ 0 };
-
 			s_ctl_ip.e_cmd = IVD_CMD_VIDEO_CTL;
 			s_ctl_ip.e_sub_cmd = IVD_CMD_CTL_GETBUFINFO;
 			s_ctl_ip.u4_size = sizeof(ivd_ctl_getbufinfo_ip_t);
@@ -424,6 +420,7 @@ namespace H264
 
 			status = ih264d_api_function(m_codecCtx, &s_set_display_frame_ip, &s_set_display_frame_op);
 			cemu_assert(!status);
+
 
 			// mark all as released (available)
 			for (uint32 i = 0; i < s_ctl_op.u4_num_disp_bufs; i++)

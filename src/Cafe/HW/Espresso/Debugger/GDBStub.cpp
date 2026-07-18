@@ -12,7 +12,7 @@
 #include "Cafe/HW/Espresso/EspressoISA.h"
 #include "Common/socket.h"
 
-#if BOOST_OS_UNIX
+#if BOOST_OS_UNIX || defined(__SWITCH__)
 #include <netinet/tcp.h>
 #endif
 

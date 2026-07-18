@@ -1,6 +1,7 @@
 #include "prudp.h"
 #include "nex.h"
 #include "nexThread.h"
+#include "util/helpers/ThreadHelpers.h"
 
 std::mutex mtx_queuedServices;
 std::vector<nexService*> list_queuedServices;
@@ -59,9 +60,13 @@ void nexThread_init()
 {
 	if (_nexThreadLaunched)
 		return;
-	std::thread t(nexThread_run);
-	nexThreadId = t.get_id();
-	t.detach();
+	std::promise<std::thread::id> threadIdPromise;
+	auto threadIdFuture = threadIdPromise.get_future();
+	cemuCreateDetachedThread([promise = std::move(threadIdPromise)]() mutable {
+		promise.set_value(std::this_thread::get_id());
+		nexThread_run();
+	});
+	nexThreadId = threadIdFuture.get();
 	_nexThreadLaunched = true;
 }
 

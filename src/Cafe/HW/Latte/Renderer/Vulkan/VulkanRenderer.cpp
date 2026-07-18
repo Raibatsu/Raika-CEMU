@@ -28,6 +28,14 @@
 
 #include "Cafe/HW/Latte/Core/LatteTiming.h" // vsync control
 
+#if defined(__SWITCH__)
+#include "platform/switch/SwitchPlatform.h"
+#include "platform/switch/SwitchSwkbd.h"
+extern "C" {
+#include <switch/services/applet.h>
+}
+#endif
+
 #include <cstdint>
 #include <glslang/Public/ShaderLang.h>
 
@@ -111,7 +119,9 @@ std::vector<VulkanRenderer::DeviceInfo> VulkanRenderer::GetDevices()
 	std::vector<const char*> requiredExtensions;
 	requiredExtensions.clear();
 	requiredExtensions.emplace_back(VK_KHR_SURFACE_EXTENSION_NAME);
-	#if BOOST_OS_WINDOWS
+	#if defined(__SWITCH__)
+	requiredExtensions.emplace_back(VK_NN_VI_SURFACE_EXTENSION_NAME);
+	#elif BOOST_OS_WINDOWS
 	requiredExtensions.emplace_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 	#elif BOOST_OS_LINUX || BOOST_OS_BSD
 	auto backend = WindowSystem::GetWindowInfo().window_main.backend;
@@ -239,6 +249,7 @@ void VulkanRenderer::DetermineVendor()
 			m_featureControl.disableMultithreadedCompilation = true;
 		}
 	}
+
 }
 
 void VulkanRenderer::GetDeviceFeatures()
@@ -795,7 +806,15 @@ VulkanRenderer::VulkanRenderer() : Renderer(RendererAPI::Vulkan)
 	// extension info
 	// cemuLog_log(LogType::Force, "VK_KHR_dynamic_rendering: {}", m_featureControl.deviceExtensions.dynamic_rendering?"supported":"not supported");
 
-	void* bufferPtr;
+	auto mapMemory = [this](VkDeviceMemory memory, const char* description)
+	{
+		void* bufferPtr = nullptr;
+		const VkResult result = vkMapMemory(m_logicalDevice, memory, 0, VK_WHOLE_SIZE, 0, &bufferPtr);
+		if (result != VK_SUCCESS || !bufferPtr)
+			UnrecoverableError(fmt::format("Failed to map {} ({})", description, (sint32)result).c_str());
+		return bufferPtr;
+	};
+
 	// init ringbuffer for uniform vars
 	m_uniformVarBufferMemoryIsCoherent = false;
 	if (memoryManager->CreateBuffer(UNIFORMVAR_RINGBUFFER_SIZE, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, m_uniformVarBuffer, m_uniformVarBufferMemory))
@@ -806,38 +825,33 @@ VulkanRenderer::VulkanRenderer() : Renderer(RendererAPI::Vulkan)
 		m_uniformVarBufferMemoryIsCoherent = true;
 	else if (memoryManager->CreateBuffer(UNIFORMVAR_RINGBUFFER_SIZE, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_uniformVarBuffer, m_uniformVarBufferMemory))
 		m_uniformVarBufferMemoryIsCoherent = true;
-	else
-	{
-		memoryManager->CreateBuffer(UNIFORMVAR_RINGBUFFER_SIZE, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, m_uniformVarBuffer, m_uniformVarBufferMemory);
-	}
+	else if (!memoryManager->CreateBuffer(UNIFORMVAR_RINGBUFFER_SIZE, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, m_uniformVarBuffer, m_uniformVarBufferMemory))
+		UnrecoverableError("Failed to allocate the Vulkan uniform buffer");
 
 	if (!m_uniformVarBufferMemoryIsCoherent)
 		cemuLog_log(LogType::Force, "[Vulkan-Info] Using non-coherent memory for uniform data");
-	bufferPtr = nullptr;
-	vkMapMemory(m_logicalDevice, m_uniformVarBufferMemory, 0, VK_WHOLE_SIZE, 0, &bufferPtr);
-	m_uniformVarBufferPtr = (uint8*)bufferPtr;
+	m_uniformVarBufferPtr = static_cast<uint8*>(mapMemory(m_uniformVarBufferMemory, "the Vulkan uniform buffer"));
 
 	// texture readback buffer
 	if (!memoryManager->CreateBuffer(TEXTURE_READBACK_SIZE, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, m_textureReadbackBuffer, m_textureReadbackBufferMemory))
 	{
-		memoryManager->CreateBuffer(TEXTURE_READBACK_SIZE, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, m_textureReadbackBuffer, m_textureReadbackBufferMemory);
+		if (!memoryManager->CreateBuffer(TEXTURE_READBACK_SIZE, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, m_textureReadbackBuffer, m_textureReadbackBufferMemory))
+			UnrecoverableError("Failed to allocate the Vulkan texture readback buffer");
 	}
-	bufferPtr = nullptr;
-	vkMapMemory(m_logicalDevice, m_textureReadbackBufferMemory, 0, VK_WHOLE_SIZE, 0, &bufferPtr);
-	m_textureReadbackBufferPtr = (uint8*)bufferPtr;
+	m_textureReadbackBufferPtr = static_cast<uint8*>(mapMemory(m_textureReadbackBufferMemory, "the Vulkan texture readback buffer"));
 
 	// transform feedback ringbuffer
 	VkBufferUsageFlags xfbRingBufferUsage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-	memoryManager->CreateBuffer(LatteStreamout_GetRingBufferSize(), xfbRingBufferUsage, 0, m_xfbRingBuffer, m_xfbRingBufferMemory);
+	if (!memoryManager->CreateBuffer(LatteStreamout_GetRingBufferSize(), xfbRingBufferUsage, 0, m_xfbRingBuffer, m_xfbRingBufferMemory))
+		UnrecoverableError("Failed to allocate the Vulkan transform feedback buffer");
 
 	// occlusion query result buffer
 	if (!memoryManager->CreateBuffer(OCCLUSION_QUERY_POOL_SIZE * sizeof(uint64), VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, m_occlusionQueries.bufferQueryResults, m_occlusionQueries.memoryQueryResults))
 	{
-		memoryManager->CreateBuffer(OCCLUSION_QUERY_POOL_SIZE * sizeof(uint64), VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, m_occlusionQueries.bufferQueryResults, m_occlusionQueries.memoryQueryResults);
+		if (!memoryManager->CreateBuffer(OCCLUSION_QUERY_POOL_SIZE * sizeof(uint64), VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, m_occlusionQueries.bufferQueryResults, m_occlusionQueries.memoryQueryResults))
+			UnrecoverableError("Failed to allocate the Vulkan occlusion query buffer");
 	}
-	bufferPtr = nullptr;
-	vkMapMemory(m_logicalDevice, m_occlusionQueries.memoryQueryResults, 0, VK_WHOLE_SIZE, 0, &bufferPtr);
-	m_occlusionQueries.ptrQueryResults = (uint64*)bufferPtr;
+	m_occlusionQueries.ptrQueryResults = static_cast<uint64*>(mapMemory(m_occlusionQueries.memoryQueryResults, "the Vulkan occlusion query buffer"));
 
 	for (sint32 i = 0; i < OCCLUSION_QUERY_POOL_SIZE; i++)
 		m_occlusionQueries.list_availableQueryIndices.emplace_back(i);
@@ -1483,7 +1497,9 @@ std::vector<const char*> VulkanRenderer::CheckInstanceExtensionSupport(FeatureCo
 	// build list of required extensions
 	std::vector<const char*> requiredInstanceExtensions;
 	requiredInstanceExtensions.emplace_back(VK_KHR_SURFACE_EXTENSION_NAME);
-	#if BOOST_OS_WINDOWS
+	#if defined(__SWITCH__)
+	requiredInstanceExtensions.emplace_back(VK_NN_VI_SURFACE_EXTENSION_NAME);
+	#elif BOOST_OS_WINDOWS
 	requiredInstanceExtensions.emplace_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 	#elif BOOST_OS_LINUX || BOOST_OS_BSD
 	auto backend = WindowSystem::GetWindowInfo().window_main.backend;
@@ -1632,9 +1648,28 @@ VkSurfaceKHR VulkanRenderer::CreateWaylandSurface(VkInstance instance, wl_displa
 #endif // HAS_WAYLAND
 #endif // BOOST_OS_LINUX
 
+#if defined(__SWITCH__)
+VkSurfaceKHR VulkanRenderer::CreateViSurface(VkInstance instance, void* nativeWindow)
+{
+	VkViSurfaceCreateInfoNN sci{};
+	sci.sType = VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN;
+	sci.window = nativeWindow;
+
+	VkSurfaceKHR result{VK_NULL_HANDLE};
+	const VkResult err = vkCreateViSurfaceNN(instance, &sci, nullptr, &result);
+	if (err != VK_SUCCESS)
+	{
+		throw std::runtime_error(fmt::format("Cannot create a VI Vulkan surface: {}", err));
+	}
+	return result;
+}
+#endif
+
 VkSurfaceKHR VulkanRenderer::CreateFramebufferSurface(VkInstance instance, WindowSystem::WindowHandleInfo& windowInfo)
 {
-#if BOOST_OS_WINDOWS
+#if defined(__SWITCH__)
+	return CreateViSurface(instance, windowInfo.surface);
+#elif BOOST_OS_WINDOWS
 	return CreateWinSurface(instance, static_cast<HWND>(windowInfo.surface));
 #elif BOOST_OS_LINUX || BOOST_OS_BSD
 	if(windowInfo.backend == WindowSystem::WindowHandleInfo::Backend::X11)
@@ -2194,8 +2229,14 @@ void VulkanRenderer::SubmitCommandBuffer(VkSemaphore signalSemaphore, VkSemaphor
 	draw_endRenderPass();
 
 	occlusionQuery_notifyEndCommandBuffer();
+	memoryManager->FlushPendingRanges();
 
-	vkEndCommandBuffer(m_state.currentCommandBuffer);
+	const auto ensureSuccess = [this](VkResult result, const char* operation) {
+		if (result != VK_SUCCESS)
+			UnrecoverableError(fmt::format("{} failed with {}", operation, (sint32)result).c_str());
+	};
+
+	ensureSuccess(vkEndCommandBuffer(m_state.currentCommandBuffer), "vkEndCommandBuffer");
 
 	VkSubmitInfo submitInfo = {};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -2229,9 +2270,7 @@ void VulkanRenderer::SubmitCommandBuffer(VkSemaphore signalSemaphore, VkSemaphor
 	submitInfo.pWaitDstStageMask = semWaitStageMask;
 	submitInfo.pWaitSemaphores = waitSemArray;
 
-	const VkResult result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_cmdBufferFences[m_commandBufferIndex]);
-	if (result != VK_SUCCESS)
-		UnrecoverableError(fmt::format("failed to submit command buffer. Error {}", result).c_str());
+	ensureSuccess(vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_cmdBufferFences[m_commandBufferIndex]), "vkQueueSubmit");
 	m_numSubmittedCmdBuffers++;
 
 	// check if any previously submitted command buffers have finished execution
@@ -2250,13 +2289,13 @@ void VulkanRenderer::SubmitCommandBuffer(VkSemaphore signalSemaphore, VkSemaphor
 
 
 	m_state.currentCommandBuffer = m_commandBuffers[m_commandBufferIndex];
-	vkResetFences(m_logicalDevice, 1, &m_cmdBufferFences[m_commandBufferIndex]);
-	vkResetCommandBuffer(m_state.currentCommandBuffer, 0);
+	ensureSuccess(vkResetFences(m_logicalDevice, 1, &m_cmdBufferFences[m_commandBufferIndex]), "vkResetFences");
+	ensureSuccess(vkResetCommandBuffer(m_state.currentCommandBuffer, 0), "vkResetCommandBuffer");
 
 	VkCommandBufferBeginInfo beginInfo{};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer(m_state.currentCommandBuffer, &beginInfo);
+	ensureSuccess(vkBeginCommandBuffer(m_state.currentCommandBuffer, &beginInfo), "vkBeginCommandBuffer");
 
 	// make sure some states are set for this command buffer
 	vkCmdSetViewport(m_state.currentCommandBuffer, 0, 1, &m_state.currentViewport);
@@ -2271,7 +2310,7 @@ void VulkanRenderer::SubmitCommandBuffer(VkSemaphore signalSemaphore, VkSemaphor
 	occlusionQuery_notifyBeginCommandBuffer();
 
 	m_recordedDrawcalls = 0;
-	m_submitThreshold = 300;
+	m_submitThreshold = kDefaultSubmitThreshold;
 	m_submitOnIdle = false;
 }
 
@@ -2890,6 +2929,10 @@ VkPipeline VulkanRenderer::backbufferBlit_createGraphicsPipeline(VkDescriptorSet
 
 bool VulkanRenderer::AcquireNextSwapchainImage(bool mainWindow)
 {
+#if defined(__SWITCH__)
+	if (HandleSwitchAppletSuspension())
+		return false;
+#endif
 	if(!IsSwapchainInfoValid(mainWindow))
 		return false;
 
@@ -2936,6 +2979,10 @@ void VulkanRenderer::RecreateSwapchain(bool mainWindow, bool skipCreate)
 
 	chainInfo.swapchainImageIndex = -1;
 	chainInfo.Cleanup();
+#if defined(__SWITCH__)
+	if (mainWindow)
+		SwitchPlatform_ApplyWindowSurfaceSize(size.x, size.y);
+#endif
 	chainInfo.m_desiredExtent = size;
 	if(!skipCreate)
 	{
@@ -2981,6 +3028,32 @@ bool VulkanRenderer::UpdateSwapchainProperties(bool mainWindow)
 	chainInfo.m_vsyncState = configValue;
 	return true;
 }
+
+#if defined(__SWITCH__)
+bool VulkanRenderer::HandleSwitchAppletSuspension()
+{
+	if (SwitchSwkbd_IsAppletActive() || appletGetFocusState() != AppletFocusState_InFocus)
+	{
+		if (!m_switchAppletSuspended)
+		{
+			SubmitCommandBuffer();
+			WaitDeviceIdle();
+			m_switchAppletSuspended = true;
+			SwitchSwkbd_NotifyGpuIdle();
+		}
+		return true;
+	}
+	if (m_switchAppletSuspended)
+	{
+		if (m_mainSwapchainInfo)
+			m_mainSwapchainInfo->m_shouldRecreate = true;
+		if (m_padSwapchainInfo)
+			m_padSwapchainInfo->m_shouldRecreate = true;
+		m_switchAppletSuspended = false;
+	}
+	return false;
+}
+#endif
 
 void VulkanRenderer::SwapBuffer(bool mainWindow)
 {
@@ -3075,6 +3148,11 @@ void VulkanBenchmarkPrintResults();
 
 void VulkanRenderer::SwapBuffers(bool swapTV, bool swapDRC)
 {
+#if defined(__SWITCH__)
+	if (HandleSwitchAppletSuspension())
+		return;
+	SwitchPlatform_NotifyGameFrameSubmitted();
+#endif
 	SubmitCommandBuffer();
 
 	if (swapTV && IsSwapchainInfoValid(true))
@@ -3082,7 +3160,6 @@ void VulkanRenderer::SwapBuffers(bool swapTV, bool swapDRC)
 
 	if (swapDRC && IsSwapchainInfoValid(false))
 		SwapBuffer(false);
-
 	if(swapTV)
 		VulkanBenchmarkPrintResults();
 }
@@ -3512,10 +3589,17 @@ void VulkanRenderer::texture_loadSlice(LatteTexture* hostTexture, sint32 width, 
 
 	uint32 uploadSize = compressedImageSize;// memRequirements.size;
 	uint32 uploadAlignment = memRequirements.alignment;
+	if (uploadSize == 0)
+		return;
 
 	VKRSynchronizedRingAllocator& vkMemAllocator = memoryManager->getStagingAllocator();
 
 	auto uploadResv = vkMemAllocator.AllocateBufferMemory(uploadSize, uploadAlignment);
+	if (!uploadResv.memPtr)
+	{
+		UnrecoverableError("Failed to allocate Vulkan texture upload memory");
+		return;
+	}
 	memcpy(uploadResv.memPtr, pixelData, compressedImageSize);
 	vkMemAllocator.FlushReservation(uploadResv);
 
@@ -3831,16 +3915,26 @@ void VulkanRenderer::bufferCache_init(const sint32 bufferSize)
 	}
 	*/
 	if(!m_useHostMemoryForCache)
-		memoryManager->CreateBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 0, m_bufferCache, m_bufferCacheMemory);
+	{
+		if (!memoryManager->CreateBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 0, m_bufferCache, m_bufferCacheMemory))
+			UnrecoverableError("Failed to allocate the Vulkan buffer cache");
+	}
 }
 
 void VulkanRenderer::bufferCache_upload(uint8* buffer, sint32 size, uint32 bufferOffset)
 {
+	if (size <= 0)
+		return;
 	draw_endRenderPass();
 
 	VKRSynchronizedRingAllocator& vkMemAllocator = memoryManager->getStagingAllocator();
 
 	auto uploadResv = vkMemAllocator.AllocateBufferMemory(size, 256);
+	if (!uploadResv.memPtr)
+	{
+		UnrecoverableError("Failed to allocate Vulkan buffer upload memory");
+		return;
+	}
 	memcpy(uploadResv.memPtr, buffer, size);
 
 	vkMemAllocator.FlushReservation(uploadResv);

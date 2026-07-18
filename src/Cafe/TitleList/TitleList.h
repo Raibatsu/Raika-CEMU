@@ -20,6 +20,7 @@ class CafeTitleList
 public:
 
 	static void Initialize(const fs::path cacheXmlFile);
+	static void Shutdown();
 	static void LoadCacheFile();
 	static void StoreCacheFile();
 

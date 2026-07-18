@@ -19,6 +19,11 @@ HighResolutionTimer HighResolutionTimer::now()
     clock_gettime(CLOCK_MONOTONIC, &pc);
     uint64 nsec = (uint64)pc.tv_sec * (uint64)1000000000 + (uint64)pc.tv_nsec;
     return HighResolutionTimer(nsec);
+#elif defined(__SWITCH__)
+    timespec pc;
+    clock_gettime(CLOCK_MONOTONIC, &pc);
+    uint64 nsec = (uint64)pc.tv_sec * (uint64)1000000000 + (uint64)pc.tv_nsec;
+    return HighResolutionTimer(nsec);
 #endif
 }
 
@@ -38,6 +43,8 @@ uint64 HighResolutionTimer::m_freq = []() -> uint64 {
 	timespec pc;
 	clock_getres(CLOCK_MONOTONIC, &pc);
 	return (uint64)1000000000 / (uint64)pc.tv_nsec;
+#elif defined(__SWITCH__)
+    return 1000000000;
 #else
     timespec pc;
     clock_getres(CLOCK_MONOTONIC_RAW, &pc);

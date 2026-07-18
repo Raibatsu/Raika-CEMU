@@ -20,11 +20,26 @@ std::vector<SaveListCallbackEntry> sSLCallbackList;
 
 // worker thread
 std::atomic_bool sSLWorkerThreadActive{false};
+std::thread sSLWorkerThread;
 
 
 void CafeSaveList::Initialize()
 {
 
+}
+
+void CafeSaveList::Shutdown()
+{
+	if (sSLWorkerThread.joinable())
+		sSLWorkerThread.join();
+
+	std::unique_lock lock(sSLMutex);
+	for (SaveInfo* save : sSLList)
+		delete save;
+	sSLList.clear();
+	sSLCallbackList.clear();
+	sSLMLCPath.clear();
+	sSLWorkerThreadActive = false;
 }
 
 void CafeSaveList::SetMLCPath(fs::path mlcPath)
@@ -39,8 +54,13 @@ void CafeSaveList::Refresh()
 	if (sSLWorkerThreadActive)
 		return;
 	sSLWorkerThreadActive = true;
-	std::thread t(RefreshThreadWorker);
-	t.detach();
+	if (sSLWorkerThread.joinable())
+	{
+		_lock.unlock();
+		sSLWorkerThread.join();
+		_lock.lock();
+	}
+	sSLWorkerThread = std::thread(RefreshThreadWorker);
 }
 
 void CafeSaveList::RefreshThreadWorker()
