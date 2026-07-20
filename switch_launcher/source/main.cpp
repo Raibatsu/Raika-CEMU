@@ -2633,23 +2633,94 @@ static bool captureMappingInput(const InputMapping &mapping,int index,std::strin
   }
 }
 
-static void runInputMappingWizard() {
-  if (!g_pad || !SDL_GameControllerGetAttached(g_pad)) {
-    modalMessage("Control mapping", {"No controller is connected."});
-    return;
-  }
+static void runInputMappingScreen() {
   const int count=(int)(sizeof(C_inputMappings)/sizeof(*C_inputMappings));
-  for (int index=0; index<count; index++) {
-    std::string token;
-    if (!captureMappingInput(C_inputMappings[index],index,token)) {
-      toast("Mapping stopped");
+  static int savedSelection=0;
+  int sel=std::max(0,std::min(savedSelection,count-1));
+  int top=std::max(0,sel-std::min(listVis(),count)+1);
+
+  auto assignSelected=[&]() {
+    if (!g_pad || !SDL_GameControllerGetAttached(g_pad)) {
+      modalMessage("Control mapping", {"No controller is connected."});
       beginScreenFx();
       return;
     }
-    iniSet(C_inputMappings[index].key,token.c_str());
-  }
-  toast("Control mapping complete");
+    std::string token;
+    if (captureMappingInput(C_inputMappings[sel],sel,token)) {
+      iniSet(C_inputMappings[sel].key,token.c_str());
+      toast("Control assigned");
+    }
+    beginScreenFx();
+  };
+
   beginScreenFx();
+  for (;;) {
+    if (!beginUiFrame()) { savedSelection=sel; return; }
+    SDL_Event event;
+    navRepeat();
+    while (pollUiEvent(event)) {
+      pumpStick(event);
+      int tx=0,ty=0;
+      const TouchKind touch=touchFeed(event,&tx,&ty);
+      const int visible=std::min(listVis(),count);
+      if (touchScrollList(touch,sel,top,count,visible)) continue;
+      if (touch==TOUCH_TAP) {
+        if (ty<topBarH() || ty>=SH-40) { savedSelection=sel; return; }
+        int colX,colW,labelX,valX;
+        listCol(&colX,&colW,&labelX,&valX);
+        for (int row=0; row<visible && top+row<count; ++row) {
+          const int y=LIST_Y0+row*ROW_H;
+          if (tx>=colX && tx<colX+colW && ty>=y && ty<y+ROW_H) {
+            sel=top+row;
+            assignSelected();
+            break;
+          }
+        }
+        continue;
+      }
+      if (event.type!=SDL_CONTROLLERBUTTONDOWN) continue;
+      if (event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_UP) sel=(sel+count-1)%count;
+      else if (event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_DOWN) sel=(sel+1)%count;
+      else if (event.cbutton.button==BTN_CONFIRM) assignSelected();
+      else if (event.cbutton.button==BTN_CANCEL) { savedSelection=sel; return; }
+
+      if (sel<top) top=sel;
+      if (sel>=top+visible) top=sel-visible+1;
+      if (top<0) top=0;
+    }
+
+    clearUiBackground();
+    drawHeader("Control mapping","Select a control");
+    int colX,colW,labelX,valX;
+    listCol(&colX,&colW,&labelX,&valX);
+    const int visible=std::min(listVis(),count);
+    glassPanel(colX-12,LIST_Y0-10,colW+24,visible*ROW_H+18);
+    const float target=(float)(LIST_Y0+(sel-top)*ROW_H+1);
+    g_hy=(!g_uiAnimations||g_hy<0)?target:g_hy+(target-g_hy)*0.30f;
+    fillRect(colX,(int)g_hy,colW,ROW_H-2,COL_FOCUS);
+    fillRect(colX,(int)g_hy,5,ROW_H-2,COL_SEL);
+    const int fontHeight=TTF_FontHeight(g_font);
+    for (int row=0; row<visible && top+row<count; ++row) {
+      const int index=top+row;
+      const int y=LIST_Y0+row*ROW_H+(ROW_H-fontHeight)/2;
+      const bool current=index==sel;
+      drawText(g_font,labelX,y,C_inputMappings[index].label,current?COL_VAL:COL_TXT);
+      drawTextR(g_font,valX,y,mappingTokenLabel(iniGet(C_inputMappings[index].key,C_inputMappings[index].def)),current?COL_VAL:COL_DIM);
+    }
+    if (count>visible) {
+      const int trackHeight=visible*ROW_H;
+      const int trackX=colX+colW+16;
+      const int trackY=LIST_Y0-2;
+      fillRect(trackX,trackY,4,trackHeight,(SDL_Color){40,44,54,255});
+      const int thumbHeight=trackHeight*visible/count;
+      const int denominator=std::max(1,count-visible);
+      fillRect(trackX,trackY+(trackHeight-thumbHeight)*top/denominator,4,thumbHeight,COL_SEL);
+    }
+    drawTextC(g_font_sm,SW/2,SH-38,"A  Assign       B  Back",COL_DIM);
+    drawFadeIn();
+    SDL_RenderPresent(g_ren);
+    SDL_Delay(8);
+  }
 }
 
 static int s_setSel[SCR_COUNT]={0}, s_setTop[SCR_COUNT]={0};
@@ -2689,7 +2760,7 @@ static void runSettings(int scr, const char *ctx) {
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: optAdjust(S.opts[sel], 1); break;
         case BTN_CONFIRM: {
           const Opt &o=S.opts[sel];
-          if(o.type==OT_ACTION && scr==SCR_INPUT){ runInputMappingWizard(); beginScreenFx(); }
+          if(o.type==OT_ACTION && scr==SCR_INPUT){ runInputMappingScreen(); beginScreenFx(); }
           else if(o.type==OT_CHOICE && o.nch>2){ optChoosePopup(o); beginScreenFx(); }
           else optAdjust(o,1);
           break;
