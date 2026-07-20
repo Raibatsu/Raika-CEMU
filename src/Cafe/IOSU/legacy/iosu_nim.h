@@ -71,5 +71,6 @@ namespace iosu
 		#define IOSU_NIM_GET_PACKAGES_TITLEID							0x04
 
 		void Initialize();
+		void Shutdown();
 	}
 }

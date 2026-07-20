@@ -22,8 +22,11 @@
 #include "platform/switch/SwitchAmiibo.h"
 #include "platform/switch/SwitchSwkbd.h"
 #include "platform/switch/SwitchInput.h"
+#include "platform/switch/SwitchJit.h"
 #include "platform/switch/SwitchOverlay.h"
 #include "platform/switch/SwitchPlatform.h"
+#include "util/MemMapper/MemMapper.h"
+#include "Cemu/FileCache/FileCache.h"
 #include "Cemu/ncrypto/ncrypto.h"
 
 #include <thread>
@@ -406,6 +409,9 @@ namespace WindowSystem
 			SwitchInput_Shutdown();
 			s_inputInitialized = false;
 		}
+		FileCache::ShutdownAsyncWriter();
+		SwitchJit_Shutdown();
+		MemMapper::Shutdown();
 	}
 
 	static void WaitForTitleScan()

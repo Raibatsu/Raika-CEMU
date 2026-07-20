@@ -416,4 +416,48 @@ namespace MemMapper
 		else if (!fromReservation && baseAddr)
 			directRelease(baseAddr);
 	}
+
+	void Shutdown()
+	{
+		std::lock_guard<std::mutex> lock(s_mutex);
+		for (size_t i = 0; i < s_poolMaps.size();)
+		{
+			const PoolMap mapping = s_poolMaps[i];
+			if (R_FAILED(svcControlCodeMemory(mapping.handle, CodeMapOperation_UnmapOwner,
+			                                  mapping.dst, mapping.size, 0)))
+			{
+				++i;
+				continue;
+			}
+			svcCloseHandle(mapping.handle);
+			if (mapping.heapSource)
+				free(mapping.source);
+			s_poolMaps.erase(s_poolMaps.begin() + i);
+		}
+
+		if (!s_poolMaps.empty())
+			return;
+
+		for (const auto& [address, allocation] : s_directAllocations)
+		{
+			if (allocation.heapSource)
+				free(reinterpret_cast<void*>(address));
+		}
+		s_directAllocations.clear();
+
+		virtmemLock();
+		for (const AddressReservation& reservation : s_reservations)
+			virtmemRemoveReservation(reservation.reservation);
+		virtmemUnlock();
+		s_reservations.clear();
+
+		s_poolInit = false;
+		s_poolCursor = 0;
+		s_poolEnd = 0;
+		s_freePoolBlocks.clear();
+		s_reserveBase = 0;
+		s_reserveSize = 0;
+		s_instBase = 0;
+		s_instEnd = 0;
+	}
 }; // namespace MemMapper

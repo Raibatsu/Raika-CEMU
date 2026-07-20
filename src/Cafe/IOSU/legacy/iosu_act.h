@@ -1,6 +1,7 @@
 #pragma once
 
 void iosuAct_init_depr();
+void iosuAct_shutdown_depr();
 bool iosuAct_isInitialized();
 
 #define ACT_ACCOUNTID_LENGTH 	(17) // includes '\0'

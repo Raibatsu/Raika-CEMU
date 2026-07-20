@@ -3,6 +3,7 @@
 
 #include <mutex>
 #include <condition_variable>
+#include <unordered_map>
 #include "zlib.h"
 #include "Common/FileStream.h"
 
@@ -18,18 +19,12 @@ struct _FileCacheAsyncWriter
 {
 	_FileCacheAsyncWriter()
 	{
-		m_isRunning.store(true);
 		m_fileCacheThread = std::thread(&_FileCacheAsyncWriter::FileCacheThread, this);
 	}
 
 	~_FileCacheAsyncWriter()
 	{
-		if (m_isRunning.load())
-		{
-			m_isRunning.store(false);
-			m_fileCacheCondVar.notify_one();
-			m_fileCacheThread.join();
-		}
+		Shutdown();
 	}
 
 	void AddJob(FileCache* fileCache, const FileCache::FileName& name, const uint8* fileData, sint32 fileSize)
@@ -41,10 +36,32 @@ struct _FileCacheAsyncWriter
 		async.fileData = { fileData, fileData + fileSize };
 
 		std::unique_lock lock(m_fileCacheMutex);
+		if (!m_isRunning)
+			return;
 		m_writeRequests.emplace_back(std::move(async));
+		m_pendingJobs[fileCache]++;
 
 		lock.unlock();
 		m_fileCacheCondVar.notify_one();
+	}
+
+	void Flush(FileCache* fileCache)
+	{
+		std::unique_lock lock(m_fileCacheMutex);
+		m_fileCacheCondVar.wait(lock, [this, fileCache] {
+			return m_pendingJobs.find(fileCache) == m_pendingJobs.end();
+		});
+	}
+
+	void Shutdown()
+	{
+		{
+			std::unique_lock lock(m_fileCacheMutex);
+			m_isRunning = false;
+		}
+		m_fileCacheCondVar.notify_all();
+		if (m_fileCacheThread.joinable())
+			m_fileCacheThread.join();
 	}
 
 private:
@@ -54,12 +71,11 @@ private:
 		while (true)
 		{
 			std::unique_lock lock(m_fileCacheMutex);
-			while (m_writeRequests.empty())
-			{
-				m_fileCacheCondVar.wait(lock);
-				if (!m_isRunning.load(std::memory_order::relaxed))
-					return;
-			}
+			m_fileCacheCondVar.wait(lock, [this] {
+				return !m_writeRequests.empty() || !m_isRunning;
+			});
+			if (m_writeRequests.empty())
+				return;
 
 			std::vector<FileCacheAsyncJob> requestsCopy;
 			requestsCopy.swap(m_writeRequests); // fast copy & clear
@@ -68,6 +84,12 @@ private:
 			for (const auto& entry : requestsCopy)
 			{
 				entry.fileCache->AddFile({ entry.name1, entry.name2 }, entry.fileData.data(), (sint32)entry.fileData.size());
+				std::unique_lock completionLock(m_fileCacheMutex);
+				auto it = m_pendingJobs.find(entry.fileCache);
+				if (--it->second == 0)
+					m_pendingJobs.erase(it);
+				completionLock.unlock();
+				m_fileCacheCondVar.notify_all();
 			}
 		}
 	}
@@ -76,7 +98,8 @@ private:
 	std::mutex m_fileCacheMutex;
 	std::condition_variable m_fileCacheCondVar;
 	std::vector<FileCacheAsyncJob> m_writeRequests;
-	std::atomic_bool m_isRunning;
+	std::unordered_map<FileCache*, size_t> m_pendingJobs;
+	bool m_isRunning{true};
 }FileCacheAsyncWriter;
 
 #define FILECACHE_MAGIC_V1					0x8371b694 // used prior to Cemu 1.7.4, only supported caches up to 4GB
@@ -236,8 +259,14 @@ FileCache* FileCache::Open(const fs::path& path)
 
 FileCache::~FileCache()
 {
+	FileCacheAsyncWriter.Flush(this);
 	free(this->fileTableEntries);
 	delete fileStream;
+}
+
+void FileCache::ShutdownAsyncWriter()
+{
+	FileCacheAsyncWriter.Shutdown();
 }
 
 void FileCache::fileCache_updateFiletable(sint32 extraEntriesToAllocate)

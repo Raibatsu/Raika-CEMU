@@ -30,6 +30,8 @@ struct
 	std::mutex actMutex;
 }iosuAct = { };
 
+std::thread s_iosuActThread;
+
 // account manager
 
 struct actAccountData_t
@@ -673,6 +675,8 @@ int iosuAct_thread()
 	{
 		uint32 ioctlReturnValue = 0;
 		ioQueueEntry_t* ioQueueEntry = iosuIoctl_getNextWithWait(IOS_DEVICE_ACT);
+		if (!ioQueueEntry)
+			break;
 		if (ioQueueEntry->request == 0)
 		{
 			if (ioQueueEntry->countIn != 1 || ioQueueEntry->countOut != 1)
@@ -871,8 +875,17 @@ void iosuAct_init_depr()
 {
 	if (iosuAct.isInitialized)
 		return;
-	cemuCreateDetachedThread(iosuAct_thread);
+	s_iosuActThread = std::thread(iosuAct_thread);
 	iosuAct.isInitialized = true;
+}
+
+void iosuAct_shutdown_depr()
+{
+	if (!iosuAct.isInitialized)
+		return;
+	if (s_iosuActThread.joinable())
+		s_iosuActThread.join();
+	iosuAct.isInitialized = false;
 }
 
 bool iosuAct_isInitialized()

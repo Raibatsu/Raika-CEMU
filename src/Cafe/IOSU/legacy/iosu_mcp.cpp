@@ -21,6 +21,8 @@ namespace iosu
 		bool isInitialized;
 	}iosuMcp = { 0 };
 
+	std::thread s_iosuMcpThread;
+
 	std::recursive_mutex sTitleInfoMutex;
 
 	bool sHasAllTitlesMounted = false;
@@ -110,6 +112,8 @@ namespace iosu
 		{
 			uint32 returnValue = 0; // Ioctl return value
 			ioQueueEntry_t* ioQueueEntry = iosuIoctl_getNextWithWait(IOS_DEVICE_MCP);
+			if (!ioQueueEntry)
+				break;
 			if (ioQueueEntry->request == IOSU_MCP_REQUEST_CEMU)
 			{
 				iosuMcpCemuRequest_t* mcpCemuRequest = (iosuMcpCemuRequest_t*)ioQueueEntry->bufferVectors[0].buffer.GetPtr();
@@ -152,8 +156,17 @@ namespace iosu
 	{
 		if (iosuMcp.isInitialized)
 			return;
-		cemuCreateDetachedThread(iosuMcp_thread);
+		s_iosuMcpThread = std::thread(iosuMcp_thread);
 		iosuMcp.isInitialized = true;
+	}
+
+	void iosuMcp_shutdown()
+	{
+		if (!iosuMcp.isInitialized)
+			return;
+		if (s_iosuMcpThread.joinable())
+			s_iosuMcpThread.join();
+		iosuMcp.isInitialized = false;
 	}
 
 	namespace mcp

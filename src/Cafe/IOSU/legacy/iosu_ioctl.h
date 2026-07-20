@@ -53,6 +53,7 @@ typedef struct
 #define IOS_DEVICE_COUNT	10
 
 void iosuIoctl_init();
+void iosuIoctl_shutdown();
 
 
 // for use by IOSU

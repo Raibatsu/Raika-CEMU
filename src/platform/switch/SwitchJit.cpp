@@ -73,6 +73,22 @@ bool SwitchJit_InitCodeArena(size_t size)
 	return true;
 }
 
+void SwitchJit_Shutdown()
+{
+	std::lock_guard<std::mutex> lock(s_mutex);
+	if (!s_ready || R_FAILED(jitClose(&s_jit)))
+		return;
+
+	s_jit = {};
+	s_ready = false;
+	s_rwBase = nullptr;
+	s_size = 0;
+	s_cursor = 0;
+	s_freeBlocks.clear();
+	s_allocations.clear();
+	s_rxDelta = 0;
+}
+
 void* SwitchJit_AllocRw(size_t size)
 {
 	std::lock_guard<std::mutex> lock(s_mutex);

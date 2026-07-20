@@ -38,6 +38,7 @@ public:
 	static FileCache* Create(const fs::path& path, uint32 extraVersion = 0);
 	static FileCache* Open(const fs::path& path, bool allowCreate, uint32 extraVersion = 0);
 	static FileCache* Open(const fs::path& path); // open without extraVersion check
+	static void ShutdownAsyncWriter();
 
 	void UseCompression(bool enable) { enableCompression = enable; };
 

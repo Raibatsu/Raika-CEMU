@@ -50,6 +50,8 @@ namespace iosu
 		bool isInitialized;
 	}iosuAcp = { 0 };
 
+	std::thread s_iosuAcpThread;
+
 	void _xml_parseU32(tinyxml2::XMLElement* xmlElement, const char* name, uint32be* v)
 	{
 		tinyxml2::XMLElement* subElement = xmlElement->FirstChildElement(name);
@@ -523,6 +525,8 @@ namespace iosu
 		{
 			uint32 returnValue = 0; // Ioctl return value
 			ioQueueEntry_t* ioQueueEntry = iosuIoctl_getNextWithWait(IOS_DEVICE_ACP_MAIN);
+			if (!ioQueueEntry)
+				break;
 			if (ioQueueEntry->request == IOSU_ACP_REQUEST_CEMU)
 			{
 				iosuAcpCemuRequest_t* acpCemuRequest = (iosuAcpCemuRequest_t*)ioQueueEntry->bufferVectors[0].buffer.GetPtr();
@@ -568,8 +572,17 @@ namespace iosu
 	{
 		if (iosuAcp.isInitialized)
 			return;
-		cemuCreateDetachedThread(iosuAcp_thread);
+		s_iosuAcpThread = std::thread(iosuAcp_thread);
 		iosuAcp.isInitialized = true;
+	}
+
+	void iosuAcp_shutdown()
+	{
+		if (!iosuAcp.isInitialized)
+			return;
+		if (s_iosuAcpThread.joinable())
+			s_iosuAcpThread.join();
+		iosuAcp.isInitialized = false;
 	}
 
 	bool iosuAcp_isInitialized()

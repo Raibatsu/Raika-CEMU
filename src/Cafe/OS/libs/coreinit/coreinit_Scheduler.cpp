@@ -11,7 +11,7 @@ CRITICAL_SECTION s_csSchedulerLock;
 pthread_mutex_t s_ptmSchedulerLock;
 #endif
 
-void __OSLockScheduler(void* obj)
+TLS_WORKAROUND_NOINLINE void __OSLockScheduler(void* obj)
 {
 #if BOOST_OS_WINDOWS
 	EnterCriticalSection(&s_csSchedulerLock);
@@ -22,12 +22,12 @@ void __OSLockScheduler(void* obj)
 	cemu_assert_debug(s_schedulerLockCount <= 1); // >= 2 should not happen. Scheduler lock does not allow recursion
 }
 
-bool __OSHasSchedulerLock()
+TLS_WORKAROUND_NOINLINE bool __OSHasSchedulerLock()
 {
 	return s_schedulerLockCount > 0;
 }
 
-bool __OSTryLockScheduler(void* obj)
+TLS_WORKAROUND_NOINLINE bool __OSTryLockScheduler(void* obj)
 {
 	bool r;
 #if BOOST_OS_WINDOWS
@@ -43,7 +43,7 @@ bool __OSTryLockScheduler(void* obj)
 	return false;
 }
 
-void __OSUnlockScheduler(void* obj)
+TLS_WORKAROUND_NOINLINE void __OSUnlockScheduler(void* obj)
 {
 	s_schedulerLockCount--;
 	cemu_assert_debug(s_schedulerLockCount >= 0);

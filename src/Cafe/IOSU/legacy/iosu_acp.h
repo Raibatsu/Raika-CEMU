@@ -195,6 +195,7 @@ typedef struct
 namespace iosu
 {
 	void iosuAcp_init();
+	void iosuAcp_shutdown();
 
 	namespace acp
 	{

@@ -21,4 +21,8 @@ namespace MemMapper
 
 	void* AllocateMemory(void* baseAddr, size_t size, PAGE_PERMISSION permissionFlags, bool fromReservation = false);
 	void FreeMemory(void* baseAddr, size_t size, bool fromReservation = false);
+
+#if defined(__SWITCH__)
+	void Shutdown();
+#endif
 };

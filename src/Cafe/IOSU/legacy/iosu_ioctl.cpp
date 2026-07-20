@@ -9,6 +9,7 @@
 
 RingBuffer<ioQueueEntry_t*, 256> _ioctlRingbuffer[IOS_DEVICE_COUNT];
 CounterSemaphore _ioctlRingbufferSemaphore[IOS_DEVICE_COUNT];
+std::atomic_bool _ioctlDeviceRunning[IOS_DEVICE_COUNT];
 
 std::mutex ioctlMutex;
 
@@ -20,6 +21,8 @@ sint32 iosuIoctl_pushAndWait(uint32 ioctlHandle, ioQueueEntry_t* ioQueueEntry)
 		cemu_assert_debug(false);
 		return 0;
 	}
+	if (!_ioctlDeviceRunning[ioctlHandle].load(std::memory_order_acquire))
+		return -1;
 	__OSLockScheduler();
 	ioctlMutex.lock();
 	ioQueueEntry->ppcThread = coreinit::OSGetCurrentThread();
@@ -37,6 +40,8 @@ sint32 iosuIoctl_pushAndWait(uint32 ioctlHandle, ioQueueEntry_t* ioQueueEntry)
 ioQueueEntry_t* iosuIoctl_getNextWithWait(uint32 deviceIndex)
 {
 	_ioctlRingbufferSemaphore[deviceIndex].decrementWithWait();
+	if (!_ioctlDeviceRunning[deviceIndex].load(std::memory_order_acquire))
+		return nullptr;
 	if (_ioctlRingbuffer[deviceIndex].HasData() == false)
 		assert_dbg();
 	return _ioctlRingbuffer[deviceIndex].Pop();
@@ -46,6 +51,8 @@ ioQueueEntry_t* iosuIoctl_getNextWithTimeout(uint32 deviceIndex, sint32 ms)
 {
 	if (!_ioctlRingbufferSemaphore[deviceIndex].decrementWithWaitAndTimeout(ms))
 		return nullptr; // timeout or spurious wake up
+	if (!_ioctlDeviceRunning[deviceIndex].load(std::memory_order_acquire))
+		return nullptr;
 	if (_ioctlRingbuffer[deviceIndex].HasData() == false)
 		return nullptr;
 	return _ioctlRingbuffer[deviceIndex].Pop();
@@ -63,5 +70,15 @@ void iosuIoctl_init()
 	for (sint32 i = 0; i < IOS_DEVICE_COUNT; i++)
 	{
 		_ioctlRingbuffer[i].Clear();
+		_ioctlRingbufferSemaphore[i].reset();
+		_ioctlDeviceRunning[i].store(true, std::memory_order_release);
 	}
+}
+
+void iosuIoctl_shutdown()
+{
+	for (sint32 i = 0; i < IOS_DEVICE_COUNT; i++)
+		_ioctlDeviceRunning[i].store(false, std::memory_order_release);
+	for (sint32 i = 0; i < IOS_DEVICE_COUNT; i++)
+		_ioctlRingbufferSemaphore[i].increment();
 }

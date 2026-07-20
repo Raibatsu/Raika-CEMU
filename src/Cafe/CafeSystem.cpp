@@ -662,9 +662,14 @@ namespace CafeSystem
         if (sSystemRunning)
             ShutdownTitle();
         // shutdown persistent subsystems (deprecated manual shutdown)
+		iosuIoctl_shutdown();
 		iosu::odm::Shutdown();
+		iosu::nim::Shutdown();
+		iosu::iosuAcp_shutdown();
+		iosu::mcp::Shutdown();
+		iosu::iosuMcp_shutdown();
 		iosu::act::Stop();
-        iosu::mcp::Shutdown();
+		iosuAct_shutdown_depr();
         iosu::fsa::Shutdown();
 		// shutdown IOSU modules
 		for(auto it = s_iosuModules.rbegin(); it != s_iosuModules.rend(); ++it)

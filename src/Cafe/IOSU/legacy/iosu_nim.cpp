@@ -44,9 +44,13 @@ namespace iosu
 			// nim packages
 			// note: Seems like scope.rpx expects the number of packages to never change after the initial GetNum call?
 			std::vector<NIMPackage> packages;
-			bool packageListReady;
+			std::atomic_bool packageListReady;
 			bool backgroundThreadStarted;
 		} g_nim = {};
+
+		std::thread s_nimIoThread;
+		std::thread s_nimBackgroundThread;
+		std::atomic_bool s_nimStopping{false};
 
 		bool nim_CheckDownloadsDisabled()
 		{
@@ -246,10 +250,12 @@ namespace iosu
 
 		void nim_backgroundThread()
 		{
-			while (iosuAct_isAccountDataLoaded() == false)
+			while (!s_nimStopping.load(std::memory_order_acquire) && !iosuAct_isAccountDataLoaded())
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(500));
 			}
+			if (s_nimStopping.load(std::memory_order_acquire))
+				return;
 
 			if (nim_getLatestVersion())
 			{
@@ -266,10 +272,10 @@ namespace iosu
 			if (g_nim.backgroundThreadStarted == false)
 			{
 				cemuLog_log(LogType::Force, "IOSU: Starting nim background thread");
-				cemuCreateDetachedThread(nim_backgroundThread);
+				s_nimBackgroundThread = std::thread(nim_backgroundThread);
 				g_nim.backgroundThreadStarted = true;
 			}
-			while (g_nim.packageListReady == false)
+			while (!g_nim.packageListReady && !s_nimStopping.load(std::memory_order_acquire))
 				std::this_thread::sleep_for(std::chrono::milliseconds(200));
 		}
 
@@ -281,6 +287,8 @@ namespace iosu
 			{
 				uint32 returnValue = 0; // Ioctl return value
 				ioQueueEntry_t* ioQueueEntry = iosuIoctl_getNextWithWait(IOS_DEVICE_NIM);
+				if (!ioQueueEntry)
+					break;
 				if (ioQueueEntry->request == IOSU_NIM_REQUEST_CEMU)
 				{
 					iosuNimCemuRequest_t* nimCemuRequest = (iosuNimCemuRequest_t*)ioQueueEntry->bufferVectors[0].buffer.GetPtr();
@@ -291,12 +299,16 @@ namespace iosu
 					else if (nimCemuRequest->requestCode == IOSU_NIM_GET_PACKAGE_COUNT)
 					{
 						iosuNim_waitUntilPackageListReady();
+						if (s_nimStopping.load(std::memory_order_acquire))
+							return;
 						nimCemuRequest->resultU32.u32 = (uint32)g_nim.packages.size();
 						nimCemuRequest->returnCode = 0;
 					}
 					else if (nimCemuRequest->requestCode == IOSU_NIM_GET_PACKAGES_TITLEID)
 					{
 						iosuNim_waitUntilPackageListReady();
+						if (s_nimStopping.load(std::memory_order_acquire))
+							return;
 						uint32 maxCount = nimCemuRequest->maxCount;
 						uint64* titleIdList = (uint64*)nimCemuRequest->ptr.GetPtr();
 						uint32 count = 0;
@@ -313,6 +325,8 @@ namespace iosu
 					else if (nimCemuRequest->requestCode == IOSU_NIM_GET_PACKAGES_INFO)
 					{
 						iosuNim_waitUntilPackageListReady();
+						if (s_nimStopping.load(std::memory_order_acquire))
+							return;
 						uint32 maxCount = nimCemuRequest->maxCount;
 						uint64* titleIdList = (uint64*)nimCemuRequest->ptr.GetPtr();
 						titlePackageInfo_t* packageInfo = (titlePackageInfo_t*)nimCemuRequest->ptr2.GetPtr();
@@ -338,8 +352,21 @@ namespace iosu
 			g_nim.packages.clear();
 			g_nim.packageListReady = false;
 			g_nim.backgroundThreadStarted = false;
-			cemuCreateDetachedThread(iosuNim_thread);
+			s_nimStopping.store(false, std::memory_order_release);
+			s_nimIoThread = std::thread(iosuNim_thread);
 			g_nim.isInitialized = true;
+		}
+
+		void Shutdown()
+		{
+			if (!g_nim.isInitialized)
+				return;
+			s_nimStopping.store(true, std::memory_order_release);
+			if (s_nimIoThread.joinable())
+				s_nimIoThread.join();
+			if (s_nimBackgroundThread.joinable())
+				s_nimBackgroundThread.join();
+			g_nim.isInitialized = false;
 		}
 
 	}

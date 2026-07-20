@@ -73,6 +73,7 @@ namespace iosu
 	sint32 mcpGetTitleList(MCPTitleInfo* titleList, uint32 titleListBufferSize, uint32be* titleCount);
 
 	void iosuMcp_init();
+	void iosuMcp_shutdown();
 
 	namespace mcp
 	{
