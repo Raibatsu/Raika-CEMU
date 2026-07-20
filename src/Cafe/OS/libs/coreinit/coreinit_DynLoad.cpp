@@ -169,19 +169,26 @@ namespace coreinit
 	{
 		if (count == 0)
 			return 1;
+
+		const sint32 moduleCount = RPLLoader_GetModuleCount();
+		if (!outInfos || moduleCount < 0 || first >= static_cast<uint32>(moduleCount) ||
+			count > static_cast<uint32>(moduleCount) - first)
+			return 0;
+
 		RPLModule** modules = RPLLoader_GetModuleList();
-		for (uint32 index = first; index < count; ++index)
+		for (uint32 outputIndex = 0; outputIndex < count; ++outputIndex)
 		{
-			outInfos[index].name = modules[index]->ppcName.GetMPTR();
-			outInfos[index].textAddr = modules[index]->regionMappingBase_text.GetBEValue();
-			outInfos[index].textOffset = modules[index]->regionMappingBase_text.GetMPTR() - modules[index]->regionOrigAddr_text;
-			outInfos[index].textSize = modules[index]->regionSize_text;
-			outInfos[index].dataAddr = modules[index]->regionMappingBase_data;
-			outInfos[index].dataOffset = modules[index]->regionMappingBase_data - modules[index]->regionOrigAddr_data;
-			outInfos[index].dataSize = modules[index]->regionSize_data;
-			outInfos[index].readAddr = modules[index]->regionMappingBase_data;
-			outInfos[index].readOffset = modules[index]->regionMappingBase_data - modules[index]->regionOrigAddr_data;
-			outInfos[index].readSize = modules[index]->regionSize_data;
+			const RPLModule* module = modules[first + outputIndex];
+			outInfos[outputIndex].name = module->ppcName.GetMPTR();
+			outInfos[outputIndex].textAddr = module->regionMappingBase_text.GetBEValue();
+			outInfos[outputIndex].textOffset = module->regionMappingBase_text.GetMPTR() - module->regionOrigAddr_text;
+			outInfos[outputIndex].textSize = module->regionSize_text;
+			outInfos[outputIndex].dataAddr = module->regionMappingBase_data;
+			outInfos[outputIndex].dataOffset = module->regionMappingBase_data - module->regionOrigAddr_data;
+			outInfos[outputIndex].dataSize = module->regionSize_data;
+			outInfos[outputIndex].readAddr = module->regionMappingBase_data;
+			outInfos[outputIndex].readOffset = module->regionMappingBase_data - module->regionOrigAddr_data;
+			outInfos[outputIndex].readSize = module->regionSize_data;
 		}
 		return 1;
 	}

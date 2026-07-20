@@ -134,123 +134,130 @@ namespace H264
 			coreinit::OSSignalEvent(m_displayQueueEvt);
 		}
 
+		void QueueFailure(DecodedSlice& decodedSlice)
+		{
+			std::unique_lock lock(m_decodeQueueMtx);
+			if (!decodedSlice.isUsed || decodedSlice.result.isDecoded)
+				return;
+
+			decodedSlice.result.isDecoded = true;
+			decodedSlice.result.hasFrame = false;
+			m_displayQueue.push_back(std::distance(m_decodedSliceArray.data(), &decodedSlice));
+			lock.unlock();
+			coreinit::OSSignalEvent(m_displayQueueEvt);
+		}
+
 		// called from async worker thread
 		void Decode(DecodedSlice& decodedSlice)
 		{
+			uint8* decodeData = decodedSlice.dataToDecode.m_data;
+			uint32 decodeLength = decodedSlice.dataToDecode.m_length;
+
 			if (!m_hasBufferSizeInfo)
 			{
 				uint32 numByteConsumed = 0;
-				if (!DetermineBufferSizes(decodedSlice.dataToDecode.m_data, decodedSlice.dataToDecode.m_length, numByteConsumed))
+				if (!DetermineBufferSizes(decodeData, decodeLength, numByteConsumed) || numByteConsumed > decodeLength)
 				{
 					cemuLog_log(LogType::Force, "H264AVC: Unable to determine picture size. Ignoring decode input");
-					std::unique_lock _l(m_decodeQueueMtx);
-					decodedSlice.result.isDecoded = true;
-					decodedSlice.result.hasFrame = false;
-					coreinit::OSSignalEvent(m_displayQueueEvt);
+					QueueFailure(decodedSlice);
 					return;
 				}
-				decodedSlice.dataToDecode.m_length -= numByteConsumed;
-				decodedSlice.dataToDecode.m_data = (uint8*)decodedSlice.dataToDecode.m_data + numByteConsumed;
 				m_hasBufferSizeInfo = true;
 			}
 
-			ivd_video_decode_ip_t s_dec_ip{ 0 };
-			ivd_video_decode_op_t s_dec_op{ 0 };
-			s_dec_ip.u4_size = sizeof(ivd_video_decode_ip_t);
-			s_dec_op.u4_size = sizeof(ivd_video_decode_op_t);
-
-			s_dec_ip.e_cmd = IVD_CMD_VIDEO_DECODE;
-
-			s_dec_ip.u4_ts = std::distance(m_decodedSliceArray.data(), &decodedSlice);
-			cemu_assert_debug(s_dec_ip.u4_ts < m_decodedSliceArray.size());
-
-			s_dec_ip.pv_stream_buffer = (uint8*)decodedSlice.dataToDecode.m_data;
-			s_dec_ip.u4_num_Bytes = decodedSlice.dataToDecode.m_length;
-
-			s_dec_ip.s_out_buffer.u4_min_out_buf_size[0] = 0;
-			s_dec_ip.s_out_buffer.u4_min_out_buf_size[1] = 0;
-			s_dec_ip.s_out_buffer.u4_num_bufs = 0;
-
-			BenchmarkTimer bt;
-			bt.Start();
-			WORD32 status = ih264d_api_function(m_codecCtx, &s_dec_ip, &s_dec_op);
-			if (status != 0 && (s_dec_op.u4_error_code&0xFF) == IVD_RES_CHANGED)
+			bool producedOutput = false;
+			for (uint32 iteration = 0; decodeLength > 0 && iteration < 64; ++iteration)
 			{
-				// resolution change
-				ResetDecoder();
-				m_hasBufferSizeInfo = false;
-				Decode(decodedSlice);
-				return;
-			}
-			else if (status != 0)
-			{
-				cemuLog_log(LogType::Force, "H264: Failed to decode frame (error 0x{:08x})", status);
-				decodedSlice.result.hasFrame = false;
-				cemu_assert_unimplemented();
-				return;
-			}
+				ivd_video_decode_ip_t s_dec_ip{ 0 };
+				ivd_video_decode_op_t s_dec_op{ 0 };
+				s_dec_ip.u4_size = sizeof(ivd_video_decode_ip_t);
+				s_dec_op.u4_size = sizeof(ivd_video_decode_op_t);
+				s_dec_ip.e_cmd = IVD_CMD_VIDEO_DECODE;
+				s_dec_ip.u4_ts = std::distance(m_decodedSliceArray.data(), &decodedSlice);
+				cemu_assert_debug(s_dec_ip.u4_ts < m_decodedSliceArray.size());
+				s_dec_ip.pv_stream_buffer = decodeData;
+				s_dec_ip.u4_num_Bytes = decodeLength;
+				s_dec_ip.s_out_buffer.u4_min_out_buf_size[0] = 0;
+				s_dec_ip.s_out_buffer.u4_min_out_buf_size[1] = 0;
+				s_dec_ip.s_out_buffer.u4_num_bufs = 0;
 
-			bt.Stop();
-			double decodeTime = bt.GetElapsedMilliseconds();
-
-			cemu_assert(s_dec_op.u4_frame_decoded_flag);
-			cemu_assert_debug(s_dec_op.u4_num_bytes_consumed == decodedSlice.dataToDecode.m_length);
-
-			cemu_assert_debug(m_isBufferedMode || s_dec_op.u4_output_present); // if buffered mode is disabled, then every input should output a frame (except for partial slices?)
-
-			if (s_dec_op.u4_output_present)
-			{
-				cemu_assert(s_dec_op.e_output_format == IV_YUV_420SP_UV);
-				if (H264_IsBotW())
-				{
-					if (s_dec_op.s_disp_frm_buf.u4_y_wd == 1920 && s_dec_op.s_disp_frm_buf.u4_y_ht == 1088)
-						s_dec_op.s_disp_frm_buf.u4_y_ht = 1080;
-				}
+				BenchmarkTimer bt;
 				bt.Start();
-				PushDecodedFrame(s_dec_op);
-				bt.Stop();
-				double copyTime = bt.GetElapsedMilliseconds();
-				// release buffer
-				sint32 bufferId = -1;
-				for (size_t i = 0; i < m_displayBuf.size(); i++)
+				WORD32 status = ih264d_api_function(m_codecCtx, &s_dec_ip, &s_dec_op);
+				if (status != 0 && (s_dec_op.u4_error_code & 0xFF) == IVD_RES_CHANGED)
 				{
-					if (s_dec_op.s_disp_frm_buf.pv_y_buf >= m_displayBuf[i].data() && s_dec_op.s_disp_frm_buf.pv_y_buf < (m_displayBuf[i].data() + m_displayBuf[i].size()))
-					{
-						bufferId = (sint32)i;
-						break;
-					}
+					ResetDecoder();
+					m_hasBufferSizeInfo = false;
+					Decode(decodedSlice);
+					return;
 				}
-				cemu_assert_debug(bufferId == s_dec_op.u4_disp_buf_id);
-				cemu_assert(bufferId >= 0);
-				ivd_rel_display_frame_ip_t s_video_rel_disp_ip{ 0 };
-				ivd_rel_display_frame_op_t s_video_rel_disp_op{ 0 };
-				s_video_rel_disp_ip.e_cmd = IVD_CMD_REL_DISPLAY_FRAME;
-				s_video_rel_disp_ip.u4_size = sizeof(ivd_rel_display_frame_ip_t);
-				s_video_rel_disp_op.u4_size = sizeof(ivd_rel_display_frame_op_t);
-				s_video_rel_disp_ip.u4_disp_buf_id = bufferId;
-				status = ih264d_api_function(m_codecCtx, &s_video_rel_disp_ip, &s_video_rel_disp_op);
-				cemu_assert(!status);
+				if (status != 0)
+				{
+					cemuLog_log(LogType::Force, "H264: Failed to decode frame (error 0x{:08x})", status);
+					if (!producedOutput)
+						QueueFailure(decodedSlice);
+					return;
+				}
 
-				cemuLog_log(LogType::H264, "H264Bench | DecodeTime {}ms CopyTime {}ms", decodeTime, copyTime);
+				bt.Stop();
+				const double decodeTime = bt.GetElapsedMilliseconds();
+
+				if (s_dec_op.u4_output_present)
+				{
+					cemu_assert(s_dec_op.e_output_format == IV_YUV_420SP_UV);
+					if (H264_IsBotW() && s_dec_op.s_disp_frm_buf.u4_y_wd == 1920 && s_dec_op.s_disp_frm_buf.u4_y_ht == 1088)
+						s_dec_op.s_disp_frm_buf.u4_y_ht = 1080;
+
+					bt.Start();
+					PushDecodedFrame(s_dec_op);
+					bt.Stop();
+					producedOutput = true;
+
+					sint32 bufferId = -1;
+					for (size_t i = 0; i < m_displayBuf.size(); ++i)
+					{
+						if (s_dec_op.s_disp_frm_buf.pv_y_buf >= m_displayBuf[i].data() && s_dec_op.s_disp_frm_buf.pv_y_buf < (m_displayBuf[i].data() + m_displayBuf[i].size()))
+						{
+							bufferId = static_cast<sint32>(i);
+							break;
+						}
+					}
+					cemu_assert_debug(bufferId == s_dec_op.u4_disp_buf_id);
+					cemu_assert(bufferId >= 0);
+
+					ivd_rel_display_frame_ip_t s_video_rel_disp_ip{ 0 };
+					ivd_rel_display_frame_op_t s_video_rel_disp_op{ 0 };
+					s_video_rel_disp_ip.e_cmd = IVD_CMD_REL_DISPLAY_FRAME;
+					s_video_rel_disp_ip.u4_size = sizeof(ivd_rel_display_frame_ip_t);
+					s_video_rel_disp_op.u4_size = sizeof(ivd_rel_display_frame_op_t);
+					s_video_rel_disp_ip.u4_disp_buf_id = bufferId;
+					status = ih264d_api_function(m_codecCtx, &s_video_rel_disp_ip, &s_video_rel_disp_op);
+					cemu_assert(!status);
+
+					cemuLog_log(LogType::H264, "H264Bench | DecodeTime {}ms CopyTime {}ms", decodeTime, bt.GetElapsedMilliseconds());
+				}
+				else
+				{
+					cemuLog_log(LogType::H264, "H264Bench | DecodeTime {}ms (no frame output)", decodeTime);
+				}
+
+				if (s_dec_op.u4_frame_decoded_flag)
+					++m_numDecodedFrames;
+
+				const uint32 consumed = s_dec_op.u4_num_bytes_consumed;
+				if (consumed == 0 || consumed > decodeLength)
+				{
+					if (!producedOutput)
+						QueueFailure(decodedSlice);
+					return;
+				}
+
+				decodeData += consumed;
+				decodeLength -= consumed;
 			}
-			else
-			{
-				cemuLog_log(LogType::H264, "H264Bench | DecodeTime {}ms (no frame output)", decodeTime);
-			}
 
-			if (s_dec_op.u4_frame_decoded_flag)
-				m_numDecodedFrames++;
-			// get VUI
-			//ih264d_ctl_get_vui_params_ip_t s_ctl_get_vui_params_ip;
-			//ih264d_ctl_get_vui_params_op_t s_ctl_get_vui_params_op;
-
-			//s_ctl_get_vui_params_ip.e_cmd = IVD_CMD_VIDEO_CTL;
-			//s_ctl_get_vui_params_ip.e_sub_cmd = (IVD_CONTROL_API_COMMAND_TYPE_T)IH264D_CMD_CTL_GET_VUI_PARAMS;
-			//s_ctl_get_vui_params_ip.u4_size = sizeof(ih264d_ctl_get_vui_params_ip_t);
-			//s_ctl_get_vui_params_op.u4_size = sizeof(ih264d_ctl_get_vui_params_op_t);
-
-			//status = ih264d_api_function(mCodecCtx, &s_ctl_get_vui_params_ip, &s_ctl_get_vui_params_op);
-			//cemu_assert(status == 0);
+			if (!producedOutput)
+				QueueFailure(decodedSlice);
 		}
 
 		void Flush()
@@ -367,12 +374,16 @@ namespace H264
 			if (status != 0)
 			{
 				cemuLog_log(LogType::Force, "H264: Unable to determine buffer sizes for stream");
+				UpdateParameters(false);
 				return false;
 			}
 			numByteConsumed = s_dec_op.u4_num_bytes_consumed;
 			cemu_assert(status == 0);
 			if (s_dec_op.u4_pic_wd == 0 || s_dec_op.u4_pic_ht == 0)
+			{
+				UpdateParameters(false);
 				return false;
+			}
 			UpdateParameters(false);
 			ReinitBuffers();
 			return true;
@@ -461,7 +472,7 @@ namespace H264
 
 			ps_ctl_ip->u4_disp_wd = 0;
 			ps_ctl_ip->e_frm_skip_mode = IVD_SKIP_NONE;
-			ps_ctl_ip->e_frm_out_mode = m_isBufferedMode ? IVD_DISPLAY_FRAME_OUT : IVD_DECODE_FRAME_OUT;
+			ps_ctl_ip->e_frm_out_mode = IVD_DECODE_FRAME_OUT;
 			ps_ctl_ip->e_vid_dec_mode = headerDecodeOnly ? IVD_DECODE_HEADER : IVD_DECODE_FRAME;
 			ps_ctl_ip->e_cmd = IVD_CMD_VIDEO_CTL;
 			ps_ctl_ip->e_sub_cmd = IVD_CMD_CTL_SETPARAMS;
