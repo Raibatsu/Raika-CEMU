@@ -463,6 +463,7 @@ bool cemu_writeSettingsXml(const char *path, const std::vector<CemuKV> &s,
   ei(g, "DownscaleFilter", gi("DownscaleFilter", 0));
   ei(g, "FullscreenScaling", gi("FullscreenScaling", 0));
   es(g, "AsyncCompile", gb("AsyncCompile", true));
+  es(g, "H264HardwareDecode", gb("H264HardwareDecode", true));
   XMLElement *ov = upsertElement(doc, g, "Overlay");
   ei(ov, "Position", gi("OverlayPosition", 0));
   es(ov, "FPS", gb("OverlayFPS", false));

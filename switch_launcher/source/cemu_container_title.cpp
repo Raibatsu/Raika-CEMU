@@ -568,6 +568,28 @@ uint64_t readDiscTitleId(const std::string &path, const std::string &keysPath,
 
 } // namespace
 
+bool cemu_hasConfiguredDiscKey(const std::string &keysPath) {
+  AesKey exampleKey{};
+  if (!parseKey("541b9889519b27d363cd21604b97c67a", exampleKey))
+    return false;
+
+  FILE *file = fopen(keysPath.c_str(), "r");
+  if (!file)
+    return false;
+
+  bool configured = false;
+  char line[1024];
+  while (fgets(line, sizeof(line), file)) {
+    AesKey key{};
+    if (parseKey(line, key) && key != exampleKey) {
+      configured = true;
+      break;
+    }
+  }
+  fclose(file);
+  return configured;
+}
+
 uint64_t cemu_readContainerBaseTitleId(const std::string &path,
                                        const std::string &keysPath,
                                        std::string *error) {

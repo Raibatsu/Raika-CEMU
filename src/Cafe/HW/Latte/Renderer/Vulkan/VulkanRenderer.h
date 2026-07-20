@@ -660,7 +660,7 @@ private:
 #if defined(__SWITCH__)
 	// Bound in-flight uploads on unified memory.
 	static constexpr uint32 kCommandBufferPoolSize = 16;
-	static constexpr uint32 kDefaultSubmitThreshold = 128;
+	static constexpr uint32 kDefaultSubmitThreshold = 64;
 #else
 	static constexpr uint32 kCommandBufferPoolSize = 128;
 	static constexpr uint32 kDefaultSubmitThreshold = 300;

@@ -28,6 +28,7 @@
 #include <dirent.h>
 
 #include "griddb.h"
+#include "cemu_container_title.h"
 #include "cemu_titles.h"
 #include "cemu_settings.h"
 #include "gfxpacks.h"
@@ -245,6 +246,7 @@ enum { SCR_CPU, SCR_GRAPHICS, SCR_AUDIO, SCR_OVERLAY, SCR_INPUT, SCR_COUNT };
 static const Opt S_cpu[] = {
   O_CHOICE("CPU mode",         "cpuMode",       C_cpumode, "3"),
   O_CHOICE("CPU timer speed",  "TimerShiftFactor", C_timer, "3"),
+  O_CHOICE("Hardware video decoding",  "H264HardwareDecode", C_bool,    "true"),
 };
 static const Opt S_graphics[] = {
   O_CHOICE("VSync",                 "VSync",             C_bool01,  "0"),
@@ -3856,7 +3858,7 @@ static void openPackPanel(const GfxPack &p, PackSel &s) {
         SDL_Color oc = s.enabled ? (SDL_Color){120, 220, 120, 255} : COL_DIM; drawTextR(g_font, valX, y, s.enabled ? "On" : "Off", oc); }
       else { const GfxCat &c = cats[i - 1]; bool en = s.enabled;
         drawText(g_font, labelX, y, c.category.empty() ? "Options" : c.category.c_str(), en ? (cur ? COL_VAL : COL_TXT) : grey);
-        drawTextR(g_font, valX, y, choiceRef(c.category).c_str(), en ? (cur ? COL_VAL : COL_DIM) : grey); }
+        drawScrollTextR(g_font, valX, y, colW / 2 - 24, choiceRef(c.category).c_str(), en ? (cur ? COL_VAL : COL_DIM) : grey); }
     }
     if (nrows > vis) { int trH = vis * ROW_H, trX = colX + colW + 16, trY = LIST_Y0 - 2; fillRect(trX, trY, 4, trH, (SDL_Color){40, 44, 54, 255});
       int thH = trH * vis / nrows, dn = (nrows - vis > 0 ? nrows - vis : 1); fillRect(trX, trY + (trH - thH) * top / dn, 4, thH, COL_SEL); }
@@ -4000,7 +4002,7 @@ static void gfxPackScreen(uint64_t filterTitleId) {
         else { const GfxPack &p = packs[gr.packIndex]; PackSel &s = selByRel[p.rulesRel]; bool en = s.enabled;
           drawText(g_font, labelX + 28, y, gr.label.c_str(), cur ? COL_VAL : COL_TXT);
           SDL_Color oc = en ? (SDL_Color){120, 220, 120, 255} : COL_DIM;
-          drawTextR(g_font, valX, y, packValue(p, s).c_str(), cur ? COL_VAL : oc); }
+          drawScrollTextR(g_font, valX, y, colW / 2 - 24, packValue(p, s).c_str(), cur ? COL_VAL : oc); }
       }
     }
     if (mode == 1 && sel >= 0 && sel < (int)rows.size() && !rows[sel].header) {
@@ -4849,16 +4851,12 @@ int main(int argc, char **argv){
   const uint64_t startupUsbGeneration=SwitchStorage::UsbStatusGeneration();
   if(startupUsbGeneration!=usbGeneration){ usbGeneration=startupUsbGeneration; usbRefreshAt=SDL_GetTicks()+300; }
 
-  if (g_games.empty()&&!hasUsbSource) {
-    std::vector<std::string> lines;
-    if(gamePaths.empty()) lines={"No game folders are configured.","Open Settings > Game folders to add one."};
-    else {
-      lines={"No Wii U games were found in the configured folders.",gamePaths.front()};
-      if(gamePaths.size()>1) lines.push_back("Plus "+std::to_string(gamePaths.size()-1)+" additional folder(s).");
-    }
-    lines.push_back(""); lines.push_back("Installed titles are detected from the MLC automatically.");
-    modalMessage("No games found",lines);
-  }
+  if (!cemu_hasConfiguredDiscKey("sdmc:/switch/Cemu/keys.txt"))
+    modalMessage("Disc key required", {
+      "Cemu/keys.txt does not contain a Wii U disc key.",
+      "WUX games cannot be decrypted until a valid key is added.",
+      "",
+      "Add the key to sdmc:/switch/Cemu/keys.txt." });
 
   int sel=0, top=0, rows=1;
   bool running=true, launch=false;

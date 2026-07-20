@@ -63,6 +63,7 @@ namespace H264
 
 		void QueueForDecode(uint8* data, uint32 length, double timestamp, void* imagePtr)
 		{
+			PrepareOutputBuffer(data, length, imagePtr);
 			std::unique_lock _l(m_decodeQueueMtx);
 
 			DecodedSlice& ds = GetFreeDecodedSliceEntry();
@@ -111,6 +112,10 @@ namespace H264
 		}
 
 	  protected:
+		virtual void PrepareOutputBuffer(uint8*, uint32, void*)
+		{
+		}
+
 		DecodedSlice& GetFreeDecodedSliceEntry()
 		{
 			for (auto& slice : m_decodedSliceArray)

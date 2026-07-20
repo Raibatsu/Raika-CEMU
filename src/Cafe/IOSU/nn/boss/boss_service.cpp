@@ -1420,6 +1420,7 @@ namespace iosu::boss
 		void TitleStop() override
 		{
 			s_bossService.Stop();
+			s_bossDaemon.Stop();
 			m_fadDb.Clear();
 			m_nsDataAccessor.Close();
 		}

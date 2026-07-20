@@ -4,6 +4,9 @@
 #include "Cafe/OS/libs/h264_avc/H264DecInternal.h"
 #include "util/highresolutiontimer/HighResolutionTimer.h"
 #include "Cafe/CafeSystem.h"
+#ifdef __SWITCH__
+#include "config/CemuConfig.h"
+#endif
 
 #include "h264dec.h"
 
@@ -368,8 +371,11 @@ namespace H264
 	static H264DecoderBackend* CreateDecoder()
 	{
 #ifdef __SWITCH__
-		if (H264DecoderBackend* decoder = CreateFFmpegDecoder())
-			return decoder;
+		if (GetConfig().h264_hardware_decode.GetValue())
+		{
+			if (H264DecoderBackend* decoder = CreateFFmpegDecoder())
+				return decoder;
+		}
 #endif
 		return CreateAVCDecoder();
 	}

@@ -1103,7 +1103,7 @@ void PipelineCompiler::CompileThreadPool_Start()
 	uint32 numCompileThreads;
 
 #if defined(__SWITCH__)
-	numCompileThreads = 1;
+	numCompileThreads = 2;
 #else
 	uint32 cpuCoreCount = GetPhysicalCoreCount();
 	if (cpuCoreCount <= 2)
