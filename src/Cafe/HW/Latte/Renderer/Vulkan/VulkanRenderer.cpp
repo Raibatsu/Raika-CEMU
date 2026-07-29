@@ -29,6 +29,7 @@
 #include "Cafe/HW/Latte/Core/LatteTiming.h" // vsync control
 
 #if defined(__SWITCH__)
+#include "platform/switch/SwitchLSFG.h"
 #include "platform/switch/SwitchPlatform.h"
 #include "platform/switch/SwitchSwkbd.h"
 extern "C" {
@@ -368,6 +369,7 @@ void VulkanRenderer::GetDeviceFeatures()
 	// get limits
 	m_featureControl.limits.minUniformBufferOffsetAlignment = std::max(prop2.properties.limits.minUniformBufferOffsetAlignment, (VkDeviceSize)4);
 	m_featureControl.limits.nonCoherentAtomSize = std::max(prop2.properties.limits.nonCoherentAtomSize, (VkDeviceSize)4);
+	m_featureControl.limits.optimalBufferCopyOffsetAlignment = std::max(prop2.properties.limits.optimalBufferCopyOffsetAlignment, (VkDeviceSize)4);
 	cemuLog_log(LogType::Force, fmt::format("VulkanLimits: UBAlignment {0} nonCoherentAtomSize {1}", prop2.properties.limits.minUniformBufferOffsetAlignment, prop2.properties.limits.nonCoherentAtomSize));
 	// calculate used limits
 	m_featureControl.limits.calcUniformBufferAlignmentM1 = std::max(m_featureControl.limits.minUniformBufferOffsetAlignment, m_featureControl.limits.nonCoherentAtomSize) - 1;
@@ -751,6 +753,11 @@ VulkanRenderer::VulkanRenderer() : Renderer(RendererAPI::Vulkan)
 		attachmentFeedbackLoopDynamicStateFeature.attachmentFeedbackLoopDynamicState = VK_TRUE;
 	}
 
+#if defined(__SWITCH__)
+	VkPhysicalDeviceTimelineSemaphoreFeatures switchLsfgTimelineFeature{};
+	SwitchLSFG_PrepareDeviceFeatures(m_physicalDevice, deviceExtensionFeatures, switchLsfgTimelineFeature);
+#endif
+
 	std::vector<const char*> used_extensions;
 	VkDeviceCreateInfo createInfo = CreateDeviceCreateInfo(queueCreateInfos, deviceFeatures, deviceExtensionFeatures, used_extensions);
 
@@ -765,6 +772,10 @@ VulkanRenderer::VulkanRenderer() : Renderer(RendererAPI::Vulkan)
 
 	vkGetDeviceQueue(m_logicalDevice, m_indices.graphicsFamily, 0, &m_graphicsQueue);
 	vkGetDeviceQueue(m_logicalDevice, m_indices.graphicsFamily, 0, &m_presentQueue);
+#if defined(__SWITCH__)
+	SwitchLSFG_SetDevice(m_instance, m_physicalDevice, m_logicalDevice, m_presentQueue,
+		m_indices.graphicsFamily, vkGetInstanceProcAddr);
+#endif
 
 	vkDestroySurfaceKHR(m_instance, surface, nullptr);
 
@@ -911,6 +922,9 @@ VulkanRenderer::~VulkanRenderer()
 
 	m_padSwapchainInfo = nullptr;
 	m_mainSwapchainInfo = nullptr;
+#if defined(__SWITCH__)
+	SwitchLSFG_ResetDevice();
+#endif
 
 	// clean up resources used for surface copy
 	surfaceCopy_cleanup();
@@ -1011,6 +1025,10 @@ void VulkanRenderer::StopUsingPadAndWait()
 
 bool VulkanRenderer::IsPadWindowActive()
 {
+#if defined(__SWITCH__)
+	if (SwitchPlatform_IsGamePadOutputActive())
+		return true;
+#endif
 	return IsSwapchainInfoValid(false);
 }
 
@@ -2258,18 +2276,16 @@ void VulkanRenderer::SubmitCommandBuffer(VkSemaphore signalSemaphore, VkSemaphor
 		submitInfo.pSignalSemaphores = &m_commandBufferSemaphores[m_commandBufferIndex]; // signal current
 	}
 
-	// wait for previous command buffer semaphore
 	VkSemaphore prevSem = GetLastSubmittedCmdBufferSemaphore();
 	const VkPipelineStageFlags semWaitStageMask[2] = { VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT };
 	VkSemaphore waitSemArray[2];
 	submitInfo.waitSemaphoreCount = 0;
 	if (m_numSubmittedCmdBuffers > 0)
-		waitSemArray[submitInfo.waitSemaphoreCount++] = prevSem; // wait on semaphore from previous submit
+		waitSemArray[submitInfo.waitSemaphoreCount++] = prevSem;
 	if (waitSemaphore != VK_NULL_HANDLE)
 		waitSemArray[submitInfo.waitSemaphoreCount++] = waitSemaphore;
 	submitInfo.pWaitDstStageMask = semWaitStageMask;
 	submitInfo.pWaitSemaphores = waitSemArray;
-
 	ensureSuccess(vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_cmdBufferFences[m_commandBufferIndex]), "vkQueueSubmit");
 	m_numSubmittedCmdBuffers++;
 
@@ -2808,9 +2824,9 @@ VkPipelineShaderStageCreateInfo VulkanRenderer::CreatePipelineShaderStageCreateI
 	return shaderStageInfo;
 }
 
-VkPipeline VulkanRenderer::backbufferBlit_createGraphicsPipeline(VkDescriptorSetLayout descriptorLayout, bool padView, RendererOutputShader* shader)
+VkPipeline VulkanRenderer::backbufferBlit_createGraphicsPipeline(VkDescriptorSetLayout descriptorLayout, bool padView, bool mainWindow, RendererOutputShader* shader)
 {
-	auto& chainInfo = GetChainInfo(!padView);
+	auto& chainInfo = GetChainInfo(mainWindow);
 
 	RendererShaderVk* vertexRendererShader = static_cast<RendererShaderVk*>(shader->GetVertexShader());
 	RendererShaderVk* fragmentRendererShader = static_cast<RendererShaderVk*>(shader->GetFragmentShader());
@@ -2951,7 +2967,6 @@ bool VulkanRenderer::AcquireNextSwapchainImage(bool mainWindow)
 
 	if (!UpdateSwapchainProperties(mainWindow))
 		return false;
-
 	bool result = chainInfo.AcquireImage();
 	if (!result)
 		return false;
@@ -3111,7 +3126,14 @@ void VulkanRenderer::SwapBuffer(bool mainWindow)
 		}
 	}
 
-	VkResult result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+	VkResult result = VK_SUCCESS;
+#if defined(__SWITCH__)
+	const bool lsfgPresented = mainWindow && SwitchLSFG_Present(m_presentQueue, presentInfo, result);
+	if (!lsfgPresented)
+		result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+#else
+	result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+#endif
 	if (result < 0 && result != VK_ERROR_OUT_OF_DATE_KHR)
 	{
 		throw std::runtime_error(fmt::format("Failed to present image: {}", result));
@@ -3140,6 +3162,13 @@ void VulkanRenderer::Flush(bool waitIdle)
 
 void VulkanRenderer::NotifyLatteCommandProcessorIdle()
 {
+#if defined(__SWITCH__)
+	if (SwitchSwkbd_IsAppletActive() || m_switchAppletSuspended)
+	{
+		HandleSwitchAppletSuspension();
+		return;
+	}
+#endif
 	if (m_submitOnIdle)
 		SubmitCommandBuffer();
 }
@@ -3155,21 +3184,29 @@ void VulkanRenderer::SwapBuffers(bool swapTV, bool swapDRC)
 #endif
 	SubmitCommandBuffer();
 
-	if (swapTV && IsSwapchainInfoValid(true))
+	bool gamePadOutput = false;
+#if defined(__SWITCH__)
+	gamePadOutput = SwitchPlatform_IsGamePadOutputActive();
+#endif
+	if ((swapTV || (gamePadOutput && swapDRC)) && IsSwapchainInfoValid(true))
 		SwapBuffer(true);
 
-	if (swapDRC && IsSwapchainInfoValid(false))
+	if (!gamePadOutput && swapDRC && IsSwapchainInfoValid(false))
 		SwapBuffer(false);
-	if(swapTV)
+	if(swapTV || (gamePadOutput && swapDRC))
 		VulkanBenchmarkPrintResults();
 }
 
 void VulkanRenderer::ClearColorbuffer(bool padView)
 {
-	if (!IsSwapchainInfoValid(!padView))
+	bool mainWindow = !padView;
+#if defined(__SWITCH__)
+	mainWindow = mainWindow || SwitchPlatform_IsGamePadOutputActive();
+#endif
+	if (!IsSwapchainInfoValid(mainWindow))
 		return;
 
-	auto& chainInfo = GetChainInfo(!padView);
+	auto& chainInfo = GetChainInfo(mainWindow);
 	if (chainInfo.swapchainImageIndex == -1)
 		return;
 
@@ -3244,10 +3281,24 @@ void VulkanRenderer::ClearColorImage(LatteTextureVk* vkTexture, uint32 sliceInde
 
 void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground)
 {
-	if(!AcquireNextSwapchainImage(!padView))
+	bool mainWindow = !padView;
+#if defined(__SWITCH__)
+	const bool compositeGamePad = SwitchPlatform_IsGamePadCompositeActive();
+	const bool gamePadOutput = SwitchPlatform_IsGamePadOutputActive();
+#else
+	constexpr bool compositeGamePad = false;
+	constexpr bool gamePadOutput = false;
+#endif
+#if defined(__SWITCH__)
+	mainWindow = mainWindow || gamePadOutput;
+#endif
+	if(!AcquireNextSwapchainImage(mainWindow))
 		return;
 
-	auto& chainInfo = GetChainInfo(!padView);
+	auto& chainInfo = GetChainInfo(mainWindow);
+	const bool loadExistingComposite = compositeGamePad && chainInfo.hasDefinedSwapchainImage;
+	if (compositeGamePad)
+		clearBackground = !chainInfo.hasDefinedSwapchainImage;
 	LatteTextureViewVk* texViewVk = (LatteTextureViewVk*)texView;
 	draw_endRenderPass();
 
@@ -3260,11 +3311,11 @@ void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 	memoryBarrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
 	vkCmdPipelineBarrier(m_state.currentCommandBuffer, srcStage, dstStage, 0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 
-	auto pipeline = backbufferBlit_createGraphicsPipeline(m_swapchainDescriptorSetLayout, padView, shader);
+	auto pipeline = backbufferBlit_createGraphicsPipeline(m_swapchainDescriptorSetLayout, padView, mainWindow, shader);
 
 	VkRenderPassBeginInfo renderPassInfo = {};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	renderPassInfo.renderPass = chainInfo.m_swapchainRenderPass;
+	renderPassInfo.renderPass = loadExistingComposite ? m_imguiRenderPass : chainInfo.m_swapchainRenderPass;
 	renderPassInfo.framebuffer = chainInfo.m_swapchainFramebuffers[chainInfo.swapchainImageIndex];
 	renderPassInfo.renderArea.offset = { 0, 0 };
 	renderPassInfo.renderArea.extent = chainInfo.getExtent();
@@ -3450,11 +3501,30 @@ void VulkanRenderer::rendertarget_bindFramebufferObject(LatteCachedFBO* cfbo)
 
 void* VulkanRenderer::texture_acquireTextureUploadBuffer(uint32 size)
 {
+#if defined(__SWITCH__)
+	if (size != 0)
+	{
+		cemu_assert_debug(m_textureUploadReservation.memPtr == nullptr);
+		m_textureUploadReservation = memoryManager->getStagingAllocator().AllocateBufferMemory(
+			size, GetOptimalBufferCopyOffsetAlignment());
+		if (m_textureUploadReservation.memPtr)
+			return m_textureUploadReservation.memPtr;
+		UnrecoverableError("Failed to allocate Vulkan texture upload memory");
+		return nullptr;
+	}
+#endif
 	return memoryManager->TextureUploadBufferAcquire(size);
 }
 
 void VulkanRenderer::texture_releaseTextureUploadBuffer(uint8* mem)
 {
+#if defined(__SWITCH__)
+	if (m_textureUploadReservation.memPtr == mem && mem != nullptr)
+	{
+		m_textureUploadReservation = {};
+		return;
+	}
+#endif
 	memoryManager->TextureUploadBufferRelease(mem);
 }
 
@@ -3594,13 +3664,26 @@ void VulkanRenderer::texture_loadSlice(LatteTexture* hostTexture, sint32 width, 
 
 	VKRSynchronizedRingAllocator& vkMemAllocator = memoryManager->getStagingAllocator();
 
-	auto uploadResv = vkMemAllocator.AllocateBufferMemory(uploadSize, uploadAlignment);
-	if (!uploadResv.memPtr)
+	VKRSynchronizedRingAllocator::AllocatorReservation_t uploadResv{};
+	bool decodedDirectlyIntoStaging = false;
+#if defined(__SWITCH__)
+	if (m_textureUploadReservation.memPtr == pixelData &&
+		m_textureUploadReservation.size >= uploadSize)
 	{
-		UnrecoverableError("Failed to allocate Vulkan texture upload memory");
-		return;
+		uploadResv = m_textureUploadReservation;
+		decodedDirectlyIntoStaging = true;
 	}
-	memcpy(uploadResv.memPtr, pixelData, compressedImageSize);
+#endif
+	if (!decodedDirectlyIntoStaging)
+	{
+		uploadResv = vkMemAllocator.AllocateBufferMemory(uploadSize, uploadAlignment);
+		if (!uploadResv.memPtr)
+		{
+			UnrecoverableError("Failed to allocate Vulkan texture upload memory");
+			return;
+		}
+		memcpy(uploadResv.memPtr, pixelData, compressedImageSize);
+	}
 	vkMemAllocator.FlushReservation(uploadResv);
 
 	FormatInfoVK texFormatInfo;

@@ -83,32 +83,36 @@ bool VulkanPipelineStableCache::UpdateLoading(uint32& pipelinesLoadedTotal, uint
 	if (!s_cache)
 		return false;
 
+	constexpr size_t kMaxQueuedPipelines = 50;
+	const uint32 loadedBefore = pipelinesLoadedTotal;
 	while (g_vkCacheState.pipelineLoadIndex <= g_vkCacheState.pipelineMaxFileIndex)
 	{
-		if (m_compilationQueue.size() >= 50)
-		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-			return true; // queue up to 50 entries at a time
-		}
+		if (m_compilationQueue.size() >= kMaxQueuedPipelines)
+			break;
 
 		uint64 fileNameA, fileNameB;
 		std::vector<uint8> fileData;
 		if (s_cache->GetFileByIndex(g_vkCacheState.pipelineLoadIndex, &fileNameA, &fileNameB, fileData))
 		{
-			// queue for async compilation
 			g_vkCacheState.pipelinesQueued++;
 			m_compilationQueue.push(std::move(fileData));
-			g_vkCacheState.pipelineLoadIndex++;
-			return true;
 		}
 		g_vkCacheState.pipelineLoadIndex++;
 	}
-	if (g_vkCacheState.pipelinesLoaded != g_vkCacheState.pipelinesQueued)
-	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		return true; // pipelines still compiling
-	}
-	return false; // done
+
+	pipelinesLoadedTotal = g_vkCacheState.pipelinesLoaded;
+	const bool producerDone = g_vkCacheState.pipelineLoadIndex > g_vkCacheState.pipelineMaxFileIndex;
+	if (producerDone && pipelinesLoadedTotal == g_vkCacheState.pipelinesQueued)
+		return false;
+
+	std::unique_lock lock(m_loadingMutex);
+	m_loadingCv.wait(lock, [&] {
+		return m_numCompilationThreads == 0 ||
+			g_vkCacheState.pipelinesLoaded != loadedBefore ||
+			(!producerDone && m_compilationQueue.size() < kMaxQueuedPipelines);
+	});
+	pipelinesLoadedTotal = g_vkCacheState.pipelinesLoaded;
+	return m_numCompilationThreads != 0;
 }
 
 void VulkanPipelineStableCache::EndLoading()
@@ -117,6 +121,7 @@ void VulkanPipelineStableCache::EndLoading()
 	const uint32 threadCount = m_numCompilationThreads.exchange(0);
 	for (uint32 i = 0; i < threadCount; i++)
 		m_compilationQueue.push({});
+	m_loadingCv.notify_all();
 	for (auto& thread : m_compilationThreads)
 		thread.join();
 	m_compilationThreads.clear();
@@ -446,10 +451,12 @@ int VulkanPipelineStableCache::CompilerThread()
 	while (m_numCompilationThreads != 0)
 	{
 		std::vector<uint8> pipelineData = m_compilationQueue.pop();
+		m_loadingCv.notify_one();
 		if(pipelineData.empty())
 			continue;
 		LoadPipelineFromCache(pipelineData);
 		++g_vkCacheState.pipelinesLoaded;
+		m_loadingCv.notify_all();
 	}
 	return 0;
 }

@@ -23,8 +23,10 @@
 #include "platform/switch/SwitchSwkbd.h"
 #include "platform/switch/SwitchInput.h"
 #include "platform/switch/SwitchJit.h"
+#include "platform/switch/SwitchLSFG.h"
 #include "platform/switch/SwitchOverlay.h"
 #include "platform/switch/SwitchPlatform.h"
+#include "platform/switch/SwitchToys.h"
 #include "util/MemMapper/MemMapper.h"
 #include "Cemu/FileCache/FileCache.h"
 #include "Cemu/ncrypto/ncrypto.h"
@@ -53,6 +55,9 @@ namespace
 	std::atomic_int s_surfaceHeight{720};
 	std::atomic_bool s_exitRequested{false};
 	std::atomic_bool s_returnToLauncher{true};
+	std::atomic<SwitchGamePadLayout> s_gamePadLayout{SwitchGamePadLayout::Disabled};
+	std::atomic<SwitchGamePadLayout> s_lastCompositeLayout{SwitchGamePadLayout::Right};
+	std::atomic_bool s_gamePadLayoutChanged{false};
 
 	constexpr uint64_t kGameBootBoostHandoffTimeoutNs = 300'000'000'000ULL;
 
@@ -65,6 +70,12 @@ namespace
 			return;
 
 		appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+	}
+
+	bool IsCompositeLayout(SwitchGamePadLayout layout)
+	{
+		return layout == SwitchGamePadLayout::Right || layout == SwitchGamePadLayout::Left ||
+			layout == SwitchGamePadLayout::Below || layout == SwitchGamePadLayout::Above;
 	}
 }
 
@@ -82,6 +93,100 @@ bool SwitchPlatform_ShouldReturnToLauncher()
 bool SwitchPlatform_UseTripleBuffer()
 {
 	return s_switchTripleBuffer;
+}
+
+void SwitchPlatform_SetGamePadLayout(SwitchGamePadLayout layout)
+{
+	if (IsCompositeLayout(layout))
+		s_lastCompositeLayout.store(layout, std::memory_order_release);
+	const SwitchGamePadLayout previous = s_gamePadLayout.exchange(layout, std::memory_order_acq_rel);
+	if (previous != layout)
+		s_gamePadLayoutChanged.store(true, std::memory_order_release);
+	WindowSystem::GetWindowInfo().pad_open.store(layout != SwitchGamePadLayout::Disabled, std::memory_order_release);
+}
+
+SwitchGamePadLayout SwitchPlatform_GetGamePadLayout()
+{
+	return s_gamePadLayout.load(std::memory_order_acquire);
+}
+
+void SwitchPlatform_CycleGamePadMode()
+{
+	const SwitchGamePadLayout current = SwitchPlatform_GetGamePadLayout();
+	if (current == SwitchGamePadLayout::Disabled)
+		SwitchPlatform_SetGamePadLayout(SwitchGamePadLayout::PadOnly);
+	else if (current == SwitchGamePadLayout::PadOnly)
+		SwitchPlatform_SetGamePadLayout(s_lastCompositeLayout.load(std::memory_order_acquire));
+	else
+		SwitchPlatform_SetGamePadLayout(SwitchGamePadLayout::Disabled);
+}
+
+bool SwitchPlatform_TakeGamePadLayoutChange()
+{
+	return s_gamePadLayoutChanged.exchange(false, std::memory_order_acq_rel);
+}
+
+bool SwitchPlatform_IsGamePadOutputActive()
+{
+	return SwitchPlatform_GetGamePadLayout() != SwitchGamePadLayout::Disabled;
+}
+
+bool SwitchPlatform_IsGamePadOnly()
+{
+	return SwitchPlatform_GetGamePadLayout() == SwitchGamePadLayout::PadOnly;
+}
+
+bool SwitchPlatform_IsGamePadCompositeActive()
+{
+	return IsCompositeLayout(SwitchPlatform_GetGamePadLayout());
+}
+
+void SwitchPlatform_GetGamePadViewRegion(bool padView, int fullWidth, int fullHeight,
+	int& x, int& y, int& width, int& height)
+{
+	x = 0;
+	y = 0;
+	width = fullWidth;
+	height = fullHeight;
+	switch (SwitchPlatform_GetGamePadLayout())
+	{
+	case SwitchGamePadLayout::Right:
+		width = fullWidth / 2;
+		x = padView ? width : 0;
+		break;
+	case SwitchGamePadLayout::Left:
+		width = fullWidth / 2;
+		x = padView ? 0 : width;
+		break;
+	case SwitchGamePadLayout::Below:
+		height = fullHeight / 2;
+		y = padView ? height : 0;
+		break;
+	case SwitchGamePadLayout::Above:
+		height = fullHeight / 2;
+		y = padView ? 0 : height;
+		break;
+	case SwitchGamePadLayout::PadOnly:
+	case SwitchGamePadLayout::Disabled:
+		break;
+	}
+}
+
+void SwitchPlatform_GetGamePadImageRect(bool padView, int fullWidth, int fullHeight,
+	int sourceWidth, int sourceHeight, int& x, int& y, int& width, int& height)
+{
+	SwitchPlatform_GetGamePadViewRegion(padView, fullWidth, fullHeight, x, y, width, height);
+	int scaledWidth = width;
+	int scaledHeight = sourceHeight * width / std::max(sourceWidth, 1);
+	if (scaledHeight > height)
+	{
+		scaledWidth = sourceWidth * height / std::max(sourceHeight, 1);
+		scaledHeight = height;
+	}
+	x += (width - scaledWidth) / 2;
+	y += (height - scaledHeight) / 2;
+	width = scaledWidth;
+	height = scaledHeight;
 }
 
 void SwitchPlatform_BeginGameBootBoost()
@@ -226,14 +331,14 @@ namespace WindowSystem
 		std::set<fs::path> failedWriteAccess;
 		ActiveSettings::SetPaths(
 			/*isPortableMode*/ true,
-			/*executablePath*/ "sdmc:/switch/Cemu/Cemu.nro",
-			/*userDataPath*/   "sdmc:/switch/Cemu",
-			/*configPath*/     "sdmc:/switch/Cemu",
-			/*cachePath*/      "sdmc:/switch/Cemu/cache",
+			/*executablePath*/ "sdmc:/switch/cemu/cemu.nro",
+			/*userDataPath*/   "sdmc:/switch/cemu",
+			/*configPath*/     "sdmc:/switch/cemu",
+			/*cachePath*/      "sdmc:/switch/cemu/cache",
 			/*dataPath*/       "romfs:/",
 			failedWriteAccess);
 		std::error_code mkdirEc;
-		fs::create_directories(_utf8ToPath("sdmc:/switch/Cemu/games"), mkdirEc);
+		fs::create_directories(_utf8ToPath("sdmc:/switch/cemu/games"), mkdirEc);
 	}
 
 	static void InitializeMlcLayout()
@@ -332,6 +437,12 @@ namespace WindowSystem
 			n_config.Load();
 
 		LoadHandoff();
+		const std::string lsfgEnabled = Handoff("lsfg_enabled", "false");
+		const std::string lsfgPerformance = Handoff("lsfg_performance", "true");
+		SwitchLSFG_Configure(
+			lsfgEnabled == "true" || lsfgEnabled == "1",
+			std::strtof(Handoff("lsfg_flow_scale", "0.25").c_str(), nullptr),
+			lsfgPerformance != "false" && lsfgPerformance != "0");
 		if (int shift = atoi(Handoff("timer_shift", "3").c_str()); shift >= 0 && shift <= 7)
 			ActiveSettings::SetTimerShiftFactor((uint8)shift);
 		s_switchTripleBuffer = (Handoff("triple_buffer", "1") != "0");
@@ -342,6 +453,26 @@ namespace WindowSystem
 			ActiveSettings::SetCPUModeOverride(CPUMode::SinglecoreRecompiler);
 		else if (cpuMode == "3")
 			ActiveSettings::SetCPUModeOverride(CPUMode::MulticoreRecompiler);
+
+		const std::string gamePadLayout = Handoff("gamepad_layout", "off");
+		SwitchPlatform_SetGamePadLayout(
+			gamePadLayout == "pad" ? SwitchGamePadLayout::PadOnly :
+			gamePadLayout == "right" ? SwitchGamePadLayout::Right :
+			gamePadLayout == "left" ? SwitchGamePadLayout::Left :
+			gamePadLayout == "below" ? SwitchGamePadLayout::Below :
+			gamePadLayout == "above" ? SwitchGamePadLayout::Above : SwitchGamePadLayout::Disabled);
+
+		auto applyUsbSetting = [](const char* key, auto& value) {
+			const std::string setting = Handoff(key);
+			if (!setting.empty())
+				value = setting == "true" || setting == "1";
+		};
+		applyUsbSetting("usb_skylanders", GetConfig().emulated_usb_devices.emulate_skylander_portal);
+		applyUsbSetting("usb_infinity", GetConfig().emulated_usb_devices.emulate_infinity_base);
+		applyUsbSetting("usb_dimensions", GetConfig().emulated_usb_devices.emulate_dimensions_toypad);
+
+		SwitchToys_Initialize();
+		SwitchOverlay_Initialize();
 
 		LatteOverlay_init();
 
@@ -365,23 +496,12 @@ namespace WindowSystem
 
 		CafeTitleList::Initialize(ActiveSettings::GetUserDataPath("title_list_cache.xml"));
 		s_titleListInitialized = true;
-		if (GetConfig().game_paths.empty())
-			CafeTitleList::AddScanPath(_utf8ToPath("sdmc:/switch/Cemu/games"));
-		else
-			for (auto& it : GetConfig().game_paths)
-				CafeTitleList::AddScanPath(_utf8ToPath(it));
 		fs::path mlcPath = ActiveSettings::GetMlcPath();
-		if (!mlcPath.empty())
-			CafeTitleList::SetMLCPath(mlcPath);
-		CafeTitleList::Refresh();
 
 		CafeSaveList::Initialize();
 		s_saveListInitialized = true;
 		if (!mlcPath.empty())
-		{
 			CafeSaveList::SetMLCPath(mlcPath);
-			CafeSaveList::Refresh();
-		}
 	}
 
 	static void CommonShutdown()
@@ -414,10 +534,41 @@ namespace WindowSystem
 		MemMapper::Shutdown();
 	}
 
-	static void WaitForTitleScan()
+	static void AddInstalledTitleComponents(TitleId titleId)
 	{
-		for (int waitedMs = 0; CafeTitleList::IsScanning() && waitedMs < 30000; waitedMs += 20)
-			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		const TitleId baseTitleId = TitleIdParser::MakeBaseTitleId(titleId);
+		const uint64 low = baseTitleId & 0xFFFFFFFFULL;
+		const TitleId candidates[] = {
+			baseTitleId,
+			(baseTitleId & ~(0xFFULL << 32)) | (0x0EULL << 32),
+			(baseTitleId & ~(0xFFULL << 32)) | (0x0CULL << 32),
+		};
+		const fs::path titleRoot = ActiveSettings::GetMlcPath() / "usr/title";
+		for (TitleId candidate : candidates)
+		{
+			const fs::path path = titleRoot /
+				fmt::format("{:08x}", static_cast<uint32>(candidate >> 32)) /
+				fmt::format("{:08x}", static_cast<uint32>(low));
+			std::error_code ec;
+			if (fs::is_directory(path, ec))
+				CafeTitleList::AddTitleFromPath(path);
+		}
+	}
+
+	static bool ResolveTitleId(TitleId titleId, TitleId& baseTitleId)
+	{
+		AddInstalledTitleComponents(titleId);
+		return CafeTitleList::FindBaseTitleId(titleId, baseTitleId);
+	}
+
+	static bool ResolveTitlePath(const fs::path& path, TitleId& baseTitleId)
+	{
+		TitleInfo title{path};
+		if (!title.IsValid())
+			return false;
+		CafeTitleList::AddTitleFromPath(path);
+		AddInstalledTitleComponents(title.GetAppTitleId());
+		return CafeTitleList::FindBaseTitleId(title.GetAppTitleId(), baseTitleId);
 	}
 
 	static bool LaunchPreparedTitle()
@@ -444,23 +595,17 @@ namespace WindowSystem
 					return LaunchPreparedTitle();
 				return false;
 			}
-			TitleInfo launchTitle{path};
-			if (launchTitle.IsValid())
-			{
-				CafeTitleList::AddTitleFromPath(path);
-				TitleId baseTitleId;
-				if (CafeTitleList::FindBaseTitleId(launchTitle.GetAppTitleId(), baseTitleId) &&
-					CafeSystem::PrepareForegroundTitle(baseTitleId) == CafeSystem::PREPARE_STATUS_CODE::SUCCESS)
-					return LaunchPreparedTitle();
-			}
+			TitleId baseTitleId;
+			if (ResolveTitlePath(path, baseTitleId) &&
+				CafeSystem::PrepareForegroundTitle(baseTitleId) == CafeSystem::PREPARE_STATUS_CODE::SUCCESS)
+				return LaunchPreparedTitle();
 			return false;
 		}
 
 		if (auto chosen = LaunchSettings::GetLoadTitleID(); chosen.has_value())
 		{
-			WaitForTitleScan();
 			TitleId baseTitleId;
-			if (CafeTitleList::FindBaseTitleId(chosen.value(), baseTitleId))
+			if (ResolveTitleId(chosen.value(), baseTitleId))
 			{
 				auto result = CafeSystem::PrepareForegroundTitle(baseTitleId);
 				if (result == CafeSystem::PREPARE_STATUS_CODE::SUCCESS)
@@ -472,7 +617,6 @@ namespace WindowSystem
 
 		if (std::string line = Handoff("game"); !line.empty())
 		{
-			WaitForTitleScan();
 			TitleId baseTitleId = 0;
 			bool resolved = false;
 			if (line.rfind("id:", 0) == 0)
@@ -481,18 +625,10 @@ namespace WindowSystem
 				const std::string_view idText{line.data() + 3, line.size() - 3};
 				auto [end, error] = std::from_chars(idText.data(), idText.data() + idText.size(), chosenId, 16);
 				if (error == std::errc{} && end == idText.data() + idText.size())
-					resolved = CafeTitleList::FindBaseTitleId(chosenId, baseTitleId);
+					resolved = ResolveTitleId(chosenId, baseTitleId);
 			}
 			else
-			{
-				fs::path gamePath = _utf8ToPath(line);
-				TitleInfo ti{gamePath};
-				if (ti.IsValid())
-				{
-					CafeTitleList::AddTitleFromPath(gamePath);
-					resolved = CafeTitleList::FindBaseTitleId(ti.GetAppTitleId(), baseTitleId);
-				}
-			}
+				resolved = ResolveTitlePath(_utf8ToPath(line), baseTitleId);
 			if (resolved)
 			{
 				auto result = CafeSystem::PrepareForegroundTitle(baseTitleId);
@@ -503,21 +639,6 @@ namespace WindowSystem
 			return false;
 		}
 
-		WaitForTitleScan();
-
-		auto titleIds = CafeTitleList::GetAllTitleIds();
-		for (auto titleId : titleIds)
-		{
-			TitleId baseTitleId;
-			if (!CafeTitleList::FindBaseTitleId(titleId, baseTitleId))
-			{
-				continue;
-			}
-			auto r = CafeSystem::PrepareForegroundTitle(baseTitleId);
-			if (r == CafeSystem::PREPARE_STATUS_CODE::SUCCESS)
-				return LaunchPreparedTitle();
-			return false;
-		}
 		return false;
 	}
 
@@ -553,12 +674,6 @@ namespace WindowSystem
 				s_returnToLauncher.store(true, std::memory_order_release);
 				break;
 			}
-			constexpr u64 kExitCombo = HidNpadButton_L | HidNpadButton_R | HidNpadButton_ZL | HidNpadButton_ZR;
-			if ((held & kExitCombo) == kExitCombo)
-			{
-				s_returnToLauncher.store(true, std::memory_order_release);
-				break;
-			}
 			svcSleepThread(16'000'000ULL);
 		}
 		appletSetMediaPlaybackState(false);
@@ -571,8 +686,8 @@ namespace WindowSystem
 		try
 		{
 			SetupWindowInfo();
-			CommonInit();
 			SwitchPlatform_BeginGameBootBoost();
+			CommonInit();
 			if (!BootTitle())
 				throw std::runtime_error("no launchable title was found");
 			RunLoop();
@@ -592,12 +707,16 @@ namespace WindowSystem
 	void ShowErrorDialog(std::string_view, std::string_view, std::optional<ErrorCategory>) {}
 
 	void GetWindowSize(int& w, int& h) { w = s_surfaceWidth.load(); h = s_surfaceHeight.load(); }
-	void GetPadWindowSize(int& w, int& h) { w = 0; h = 0; }
+	void GetPadWindowSize(int& w, int& h)
+	{
+		int x, y;
+		SwitchPlatform_GetGamePadViewRegion(true, s_surfaceWidth.load(), s_surfaceHeight.load(), x, y, w, h);
+	}
 	void GetWindowPhysSize(int& w, int& h) { w = s_surfaceWidth.load(); h = s_surfaceHeight.load(); }
-	void GetPadWindowPhysSize(int& w, int& h) { w = 0; h = 0; }
+	void GetPadWindowPhysSize(int& w, int& h) { GetPadWindowSize(w, h); }
 	double GetWindowDPIScale() { return 1.0; }
 	double GetPadDPIScale() { return 1.0; }
-	bool IsPadWindowOpen() { return false; }
+	bool IsPadWindowOpen() { return SwitchPlatform_IsGamePadOutputActive(); }
 	bool IsKeyDown(uint32) { return false; }
 	bool IsKeyDown(PlatformKeyCodes) { return false; }
 	std::string GetKeyCodeName(uint32) { return ""; }

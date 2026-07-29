@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BUILD_JOBS="${BUILD_JOBS:-18}"
+RELEASE_VERSION="${RELEASE_VERSION:-1.1.0}"
 case "${BUILD_JOBS}" in
 	''|*[!0-9]*|0) echo "BUILD_JOBS must be a positive integer" >&2; exit 2 ;;
 esac
@@ -14,23 +15,44 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
 echo "[1/4] Building the emulator"
-BUILD_JOBS="$BUILD_JOBS" bash "$ROOT/dist/switch/build.sh"
+RELEASE_VERSION="$RELEASE_VERSION" BUILD_JOBS="$BUILD_JOBS" bash "$ROOT/dist/switch/build.sh"
 
 echo "[2/4] Staging the emulator"
 mkdir -p "$ROOT/switch_launcher/romfs/emu"
-rm -f "$ROOT/switch_launcher/romfs/emu/Cemu.nro" "$ROOT/switch_launcher/romfs/emu/cemu_vk.nro"
-cp -f "$ROOT/bin/Cemu.nro" "$ROOT/switch_launcher/romfs/emu/cemu_vk.nro"
+rm -f "$ROOT/switch_launcher/romfs/emu/cemu_vk.nro"
+cp -f "$ROOT/bin/cemu_core.nro" "$ROOT/switch_launcher/romfs/emu/cemu_vk.nro"
 sha256sum "$ROOT/switch_launcher/romfs/emu/cemu_vk.nro" | awk '{print $1}' > "$ROOT/switch_launcher/romfs/emu/cemu_vk.sha256"
 
 echo "[3/4] Building the HOME Menu forwarder"
-make -C "$ROOT/switch_launcher/fwd" clean
-make -j "$BUILD_JOBS" -C "$ROOT/switch_launcher/fwd"
+make -C "$ROOT/switch_launcher/fwd" VERSION="$RELEASE_VERSION" clean
+make -j "$BUILD_JOBS" -C "$ROOT/switch_launcher/fwd" VERSION="$RELEASE_VERSION"
 
 echo "[4/4] Building the launcher"
+MESA20_STAGE="$ROOT/build_switch/launcher_mesa20"
+MESA20_ROOT="$MESA20_STAGE/opt/devkitpro/portlibs/switch"
+MESA20_PACKAGE="${LAUNCHER_MESA20_PACKAGE:-}"
+if [[ -z "$MESA20_PACKAGE" ]]; then
+	shopt -s nullglob
+	mesa20_packages=(/var/cache/pacman/pkg/switch-mesa-20.1.0-*.pkg.tar.zst)
+	shopt -u nullglob
+	if ((${#mesa20_packages[@]})); then
+		MESA20_PACKAGE="${mesa20_packages[${#mesa20_packages[@]}-1]}"
+	fi
+fi
+if [[ -n "$MESA20_PACKAGE" && -f "$MESA20_PACKAGE" ]]; then
+	mkdir -p "$MESA20_STAGE"
+	tar -xf "$MESA20_PACKAGE" -C "$MESA20_STAGE"
+elif grep -q '^Version: 20\.1\.0' "$DEVKITPRO/portlibs/switch/lib/pkgconfig/glesv2.pc" 2>/dev/null; then
+	MESA20_ROOT="$DEVKITPRO/portlibs/switch"
+else
+	echo "Stock switch-mesa 20.1.0 is required for the SDL launcher." >&2
+	echo "Cache it with: dkp-pacman -Sw switch-mesa" >&2
+	exit 1
+fi
 cd "$ROOT/switch_launcher"
-make clean
-make -j "$BUILD_JOBS"
+make LAUNCHER_MESA20_ROOT="$MESA20_ROOT" RELEASE_VERSION="$RELEASE_VERSION" APP_VERSION="$RELEASE_VERSION" clean
+make -j "$BUILD_JOBS" LAUNCHER_MESA20_ROOT="$MESA20_ROOT" RELEASE_VERSION="$RELEASE_VERSION" APP_VERSION="$RELEASE_VERSION"
 
 echo
-echo "Copy switch_launcher/Cemu.nro to sdmc:/switch/Cemu/Cemu.nro"
-ls -la "$ROOT/switch_launcher/Cemu.nro"
+echo "Copy switch_launcher/cemu.nro to sdmc:/switch/cemu/cemu.nro"
+ls -la "$ROOT/switch_launcher/cemu.nro"

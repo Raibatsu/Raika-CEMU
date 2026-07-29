@@ -907,13 +907,13 @@ void* PPCRecompiler_virtualHLE(PPCInterpreter_t* ppcInterpreter, uint32 hleFuncI
 void AArch64GenContext_t::loadJumpTableEntry(const WReg& ppcAddress)
 {
 	static_assert(offsetof(PPCRecompilerInstanceData_t, ppcRecompilerDirectJumpTable) == 0);
-	static_assert(PPC_REC_LOOKUP_BLOCK_SIZE == (1u << 22));
-	static_assert(PPC_REC_LOOKUP_ENTRIES_PER_BLOCK == (1u << 20));
+	static_assert(PPC_REC_LOOKUP_BLOCK_SIZE == (1u << 20));
+	static_assert(PPC_REC_LOOKUP_ENTRIES_PER_BLOCK == (1u << 18));
 
-	// Two-level lookup: bits 22+ select the directory and bits 2-21 the leaf.
-	lsr(TEMP_GPR1.wReg, ppcAddress, 22);
+	// Two-level lookup: bits 20+ select the directory and bits 2-19 the leaf.
+	lsr(TEMP_GPR1.wReg, ppcAddress, 20);
 	ldr(TEMP_GPR1.xReg, AdrExt(PPC_REC_INSTANCE_REG, TEMP_GPR1.wReg, ExtMod::UXTW, 3));
-	ubfx(TEMP_GPR2.wReg, ppcAddress, 2, 20);
+	ubfx(TEMP_GPR2.wReg, ppcAddress, 2, 18);
 	ldr(TEMP_GPR1.xReg, AdrExt(TEMP_GPR1.xReg, TEMP_GPR2.wReg, ExtMod::UXTW, 3));
 }
 

@@ -44,7 +44,7 @@ extern "C"
 		if (s_handlingException.test_and_set(std::memory_order_relaxed))
 			return;
 
-		int fd = ::open("sdmc:/switch/Cemu/crash.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+		int fd = ::open("sdmc:/switch/cemu/crash.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
 		if (fd < 0)
 			fd = ::open("crash.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
 		if (fd < 0)

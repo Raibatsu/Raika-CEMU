@@ -8,6 +8,7 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 
 #if defined(__SWITCH__)
+#include "platform/switch/SwitchLSFG.h"
 #include "platform/switch/SwitchPlatform.h"
 #endif
 
@@ -51,6 +52,9 @@ void SwapchainInfoVk::Create()
 	VkSwapchainCreateInfoKHR create_info = CreateSwapchainCreateInfo(m_surface, details, m_surfaceFormat, image_count, m_actualExtent);
 	create_info.oldSwapchain = nullptr;
 	create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+#if defined(__SWITCH__)
+	const bool lsfgCompatible = SwitchLSFG_AdjustSwapchainCreateInfo(mainWindow, create_info, details.capabilities);
+#endif
 
 	VkResult result = vkCreateSwapchainKHR(m_logicalDevice, &create_info, nullptr, &m_swapchain);
 	if (result != VK_SUCCESS)
@@ -65,6 +69,10 @@ void SwapchainInfoVk::Create()
 	result = vkGetSwapchainImagesKHR(m_logicalDevice, m_swapchain, &image_count, m_swapchainImages.data());
 	if (result != VK_SUCCESS)
 		UnrecoverableError("Error attempting to retrieve swapchain images");
+#if defined(__SWITCH__)
+	SwitchLSFG_AttachSwapchain(mainWindow, m_swapchain, m_actualExtent,
+		m_swapchainImages.data(), image_count, lsfgCompatible);
+#endif
 	// create default renderpass
 	VkAttachmentDescription colorAttachment = {};
 	colorAttachment.format = m_surfaceFormat.format;
@@ -170,6 +178,9 @@ void SwapchainInfoVk::Create()
 
 void SwapchainInfoVk::Cleanup()
 {
+#if defined(__SWITCH__)
+	SwitchLSFG_DetachSwapchain(m_swapchain);
+#endif
 	m_swapchainImages.clear();
 
 	for (auto& sem: m_acquireSemaphores)

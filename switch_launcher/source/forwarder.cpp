@@ -22,7 +22,7 @@ std::string g_forwarderSelfPath;
 
 namespace {
 
-constexpr const char *kLauncherNro = "sdmc:/switch/Cemu/Cemu.nro";
+constexpr const char *kLauncherNro = "sdmc:/switch/cemu/cemu.nro";
 
 #define FWD_TRY(x) do { const Result _rc_ = (x); if (R_FAILED(_rc_)) return _rc_; } while (0)
 
@@ -801,14 +801,14 @@ struct ForwarderConfigTransaction
     Result stage(u64 tid, const std::string &nroPath, const std::string &args)
     {
         struct stat directoryStat{};
-        if (mkdir("sdmc:/switch/Cemu/forwarders", 0777) != 0 &&
-            (errno != EEXIST || stat("sdmc:/switch/Cemu/forwarders", &directoryStat) != 0 ||
+        if (mkdir("sdmc:/switch/cemu/forwarders", 0777) != 0 &&
+            (errno != EEXIST || stat("sdmc:/switch/cemu/forwarders", &directoryStat) != 0 ||
              !S_ISDIR(directoryStat.st_mode)))
             return kForwarderIoError;
 
         char pathBuffer[128];
         const int length = snprintf(pathBuffer, sizeof(pathBuffer),
-            "sdmc:/switch/Cemu/forwarders/%016llx.cfg", static_cast<unsigned long long>(tid));
+            "sdmc:/switch/cemu/forwarders/%016llx.cfg", static_cast<unsigned long long>(tid));
         if (length < 0 || static_cast<size_t>(length) >= sizeof(pathBuffer))
             return kForwarderIoError;
         path = pathBuffer;

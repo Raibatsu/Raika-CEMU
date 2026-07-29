@@ -478,6 +478,10 @@ bool cemu_writeSettingsXml(const char *path, const std::vector<CemuKV> &s,
   ei(a, "PadChannels", 1);
   ei(a, "PadVolume", gi("PadVolume", 50));
   es(a, "PadDevice", !strcmp(gb("PadAudio", true), "true") ? "default" : "");
+  XMLElement *usb = upsertElement(doc, content, "EmulatedUsbDevices");
+  es(usb, "EmulateSkylanderPortal", gb("UsbSkylanders", false));
+  es(usb, "EmulateInfinityBase", gb("UsbInfinity", false));
+  es(usb, "EmulateDimensionsToypad", gb("UsbDimensions", false));
 
   const std::string tmp = target + ".tmp";
   FILE *file = fopen(tmp.c_str(), "wb");

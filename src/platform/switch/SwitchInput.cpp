@@ -24,11 +24,13 @@ extern "C" {
 #include "input/motion/MotionHandler.h"
 #include "platform/switch/SwitchInput.h"
 #include "platform/switch/SwitchOverlay.h"
+#include "platform/switch/SwitchPlatform.h"
 
 namespace
 {
 constexpr uint32 kNoCode = 0xFFFFFFFF;
 constexpr size_t kSwitchControllerCount = InputManager::kMaxController;
+constexpr float kTau = 6.2831853071795864769f;
 
 constexpr std::array<HidNpadIdType, kSwitchControllerCount> kNpadIds = {
 	HidNpadIdType_No1,
@@ -44,16 +46,17 @@ constexpr std::array<HidNpadIdType, kSwitchControllerCount> kNpadIds = {
 class SwitchGamepadController : public ControllerBase
 {
   public:
-	SwitchGamepadController(size_t playerIndex, HidNpadIdType npadId, bool useHandheld)
+	SwitchGamepadController(size_t playerIndex, HidNpadIdType npadId, bool useHandheld, bool gamePadFeatures)
 		: ControllerBase(fmt::format("switch-{}", playerIndex), fmt::format("Switch Controller {}", playerIndex + 1)),
-		  m_npadId(npadId), m_useHandheld(useHandheld), m_hasTouch(playerIndex == 0),
-		  m_enableMotion(playerIndex == 0)
+		  m_npadId(npadId), m_useHandheld(useHandheld), m_hasTouch(gamePadFeatures),
+		  m_enableMotion(gamePadFeatures)
 	{
 		u64 mask = BITL(static_cast<u32>(m_npadId));
 		if (m_useHandheld)
 			mask |= BITL(static_cast<u32>(HidNpadIdType_Handheld));
 		padInitializeWithMask(&m_pad, mask);
 		padUpdate(&m_pad);
+		m_connected = padIsConnected(&m_pad);
 		if (m_hasTouch)
 			hidInitializeTouchScreen();
 
@@ -76,10 +79,13 @@ class SwitchGamepadController : public ControllerBase
 	bool is_connected() override
 	{
 		std::scoped_lock lock(m_padMutex);
-		padUpdate(&m_pad);
-		return padIsConnected(&m_pad);
+		return m_connected;
 	}
-	bool has_motion() override { return m_enableMotion && m_hasMotion; }
+	bool has_motion() override
+	{
+		std::scoped_lock lock(m_padMutex);
+		return m_enableMotion && m_hasMotion;
+	}
 	MotionSample get_motion_sample() override
 	{
 		std::scoped_lock lock(m_motionMutex);
@@ -87,20 +93,46 @@ class SwitchGamepadController : public ControllerBase
 	}
 	bool has_rumble() override
 	{
+		std::scoped_lock lock(m_padMutex);
 		return std::any_of(m_vibration.begin(), m_vibration.end(), [](const auto& device) { return device.ready; });
 	}
 	void start_rumble() override { sendVibration(std::clamp(get_settings().rumble, 0.0f, 1.0f)); }
 	void stop_rumble() override { sendVibration(0.0f); }
+	bool usesGamePadFeatures() const { return m_hasTouch; }
 
-	bool has_position() override { return m_touchDown; }
-	glm::vec2 get_position() override { return m_touchPos; }
-	glm::vec2 get_prev_position() override { return m_touchPrevPos; }
-	PositionVisibility GetPositionVisibility() override { return m_touchDown ? PositionVisibility::FULL : PositionVisibility::NONE; }
+	bool has_position() override
+	{
+		std::scoped_lock lock(m_padMutex);
+		return m_touchDown;
+	}
+	glm::vec2 get_position() override
+	{
+		std::scoped_lock lock(m_padMutex);
+		return m_touchPos;
+	}
+	glm::vec2 get_prev_position() override
+	{
+		std::scoped_lock lock(m_padMutex);
+		return m_touchPrevPos;
+	}
+	PositionVisibility GetPositionVisibility() override
+	{
+		std::scoped_lock lock(m_padMutex);
+		return m_touchDown ? PositionVisibility::FULL : PositionVisibility::NONE;
+	}
 
 	ControllerState raw_state() override
 	{
-		std::scoped_lock padLock(m_padMutex);
+		std::scoped_lock lock(m_padMutex);
+		m_cachedState = pollStateLocked();
+		return m_cachedState;
+	}
+
+  private:
+	ControllerState pollStateLocked()
+	{
 		padUpdate(&m_pad);
+		m_connected = padIsConnected(&m_pad);
 		updateMotion();
 		const uint64_t b = padGetButtons(&m_pad);
 		if (SwitchOverlay_IsInputCaptured(b))
@@ -128,9 +160,29 @@ class SwitchGamepadController : public ControllerBase
 			{
 				const float nx = std::clamp((float)ts.touches[0].x / 1280.0f, 0.0f, 1.0f);
 				const float ny = std::clamp((float)ts.touches[0].y / 720.0f, 0.0f, 1.0f);
-				m_touchPrevPos = m_touchDown ? m_touchPos : glm::vec2{nx, ny};
-				m_touchPos = {nx, ny};
-				m_touchDown = true;
+				glm::vec2 nextTouch{nx, ny};
+				bool touchAccepted = true;
+				if (SwitchPlatform_IsGamePadCompositeActive())
+				{
+					int x, y, width, height;
+					SwitchPlatform_GetGamePadImageRect(true, 1280, 720, 854, 480, x, y, width, height);
+					const int touchX = ts.touches[0].x;
+					const int touchY = ts.touches[0].y;
+					touchAccepted = touchX >= x && touchX < x + width && touchY >= y && touchY < y + height;
+					if (touchAccepted)
+						nextTouch = {(float)(touchX - x) / width, (float)(touchY - y) / height};
+				}
+				if (touchAccepted)
+				{
+					m_touchPrevPos = m_touchDown ? m_touchPos : nextTouch;
+					m_touchPos = nextTouch;
+					m_touchDown = true;
+				}
+				else
+				{
+					m_touchPrevPos = m_touchPos;
+					m_touchDown = false;
+				}
 			}
 			else
 			{
@@ -190,7 +242,6 @@ class SwitchGamepadController : public ControllerBase
 		return s;
 	}
 
-  private:
 	struct VibrationDevice
 	{
 		HidNpadIdType id{};
@@ -296,6 +347,8 @@ class SwitchGamepadController : public ControllerBase
 
 	void updateMotion()
 	{
+		if (!m_enableMotion)
+			return;
 		int handleIndex = getActiveMotionHandle();
 		const auto now = std::chrono::steady_clock::now();
 		if (handleIndex < 0 && now >= m_nextMotionProbe)
@@ -351,10 +404,10 @@ class SwitchGamepadController : public ControllerBase
 			!std::isfinite(accel.x) || !std::isfinite(accel.y) || !std::isfinite(accel.z))
 			return;
 
-		// Match Cemu's SDL motion-axis convention.
+		// Convert HOS sensor coordinates and revolutions/sec to Cemu's SDL convention.
 		m_motionHandlers[index].processMotionSample(deltaTime,
-			gyro.x, -gyro.y, -gyro.z,
-			-accel.x, accel.y, accel.z);
+			gyro.x * kTau, -gyro.z * kTau, gyro.y * kTau,
+			accel.x, -accel.z, accel.y);
 		const MotionSample sample = m_motionHandlers[index].getMotionSample();
 		{
 			std::scoped_lock lock(m_motionMutex);
@@ -365,7 +418,6 @@ class SwitchGamepadController : public ControllerBase
 	void sendVibration(float amp)
 	{
 		std::scoped_lock lock(m_padMutex);
-		padUpdate(&m_pad);
 		initializeVibration();
 		const u32 style = padGetStyleSet(&m_pad);
 		VibrationDevice* active = nullptr;
@@ -397,6 +449,8 @@ class SwitchGamepadController : public ControllerBase
 	bool m_hasTouch = false;
 	bool m_enableMotion = false;
 	std::mutex m_padMutex;
+	ControllerState m_cachedState{};
+	bool m_connected = false;
 	bool m_touchDown = false;
 	glm::vec2 m_touchPos{};
 	glm::vec2 m_touchPrevPos{};
@@ -574,15 +628,16 @@ bool ConfigureMappings(const EmulatedControllerPtr& emu, EmulatedController::Typ
 	return true;
 }
 
-void EnsurePhysicalController(size_t index)
+void EnsurePhysicalController(size_t index, bool gamePadFeatures)
 {
-	if (s_controllers[index])
+	if (s_controllers[index] && s_controllers[index]->usesGamePadFeatures() == gamePadFeatures)
 		return;
-	s_controllers[index] = std::make_shared<SwitchGamepadController>(index, kNpadIds[index], index == 0);
+	s_controllers[index] = std::make_shared<SwitchGamepadController>(
+		index, kNpadIds[index], index == 0, gamePadFeatures);
 	auto settings = s_controllers[index]->get_settings();
 	settings.axis.deadzone = settings.rotation.deadzone = s_config.deadzone / 100.0f;
 	settings.rumble = s_config.rumble ? 1.0f : 0.0f;
-	settings.motion = index == 0;
+	settings.motion = gamePadFeatures;
 	s_controllers[index]->set_settings(settings);
 }
 
@@ -603,7 +658,7 @@ bool ConfigureControllers(SwitchControllerType type)
 		: InputManager::kMaxWPADControllers;
 	const size_t configuredPlayers = std::min(requestedPlayers, maxPlayers);
 	for (size_t i = 0; i < configuredPlayers; ++i)
-		EnsurePhysicalController(i);
+		EnsurePhysicalController(i, i == 0 && playerOneType == EmulatedController::Type::VPAD);
 	for (size_t i = configuredPlayers; i < s_controllers.size(); ++i)
 		s_controllers[i].reset();
 
@@ -624,7 +679,7 @@ bool ConfigureControllers(SwitchControllerType type)
 
 void SwitchInput_Setup()
 {
-	s_config = loadInputConfig("sdmc:/switch/Cemu/input.ini");
+	s_config = loadInputConfig("sdmc:/switch/cemu/input.ini");
 	SwitchControllerType type = SwitchControllerType::GamePad;
 	if (s_config.type == "Pro")
 		type = SwitchControllerType::Pro;

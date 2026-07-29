@@ -305,7 +305,7 @@ uint64_t cemu_resolveBaseTitleId(const std::string &gamePath,
 
   std::string containerError;
   if (uint64_t titleId = cemu_readContainerBaseTitleId(
-          gamePath, "sdmc:/switch/Cemu/keys.txt", &containerError))
+          gamePath, "sdmc:/switch/cemu/keys.txt", &containerError))
     return titleId;
 
   std::string normalized = cemu_normalizeTitlePath(gamePath);

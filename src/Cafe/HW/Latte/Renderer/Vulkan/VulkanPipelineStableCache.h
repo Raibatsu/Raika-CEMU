@@ -1,6 +1,8 @@
 #pragma once
 #include "util/helpers/fspinlock.h"
 
+#include <condition_variable>
+
 struct VulkanPipelineHash
 {
 	VulkanPipelineHash() = default;
@@ -67,4 +69,6 @@ private:
 	std::atomic_uint32_t m_numCompilationThreads{ 0 };
 	std::vector<std::thread> m_compilationThreads;
 	ConcurrentQueue<std::vector<uint8>> m_compilationQueue;
+	std::mutex m_loadingMutex;
+	std::condition_variable m_loadingCv;
 };

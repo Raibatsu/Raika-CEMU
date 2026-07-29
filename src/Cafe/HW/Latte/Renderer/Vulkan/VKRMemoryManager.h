@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
 #include "util/ChunkedHeap/ChunkedHeap.h"
@@ -67,9 +68,20 @@ public:
 		return this->alloc(size, alignment);
 	}
 
+	CHAddr allocDedicatedMem(uint32 size)
+	{
+		size = (size + (32 * 1024 - 1)) & ~(32 * 1024 - 1);
+		return this->allocDedicated(size);
+	}
+
 	void freeMem(CHAddr addr)
 	{
 		this->free(addr);
+	}
+
+	uint32 getAllocationSize(CHAddr addr) const
+	{
+		return ChunkedHeap<>::getAllocationSize(addr);
 	}
 
 	VkDeviceMemory getChunkMem(uint32 index)
@@ -84,9 +96,25 @@ public:
 		totalHeapSize = m_numHeapBytes;
 		allocatedBytes = m_numAllocatedBytes;
 	}
+	bool getChunkStatistics(uint32 chunkIndex, uint32& size, uint32& allocatedBytes) const
+	{
+		return ChunkedHeap<>::getChunkStatistics(chunkIndex, size, allocatedBytes);
+	}
+	uint32 getChunkCount() const
+	{
+		return static_cast<uint32>(std::count_if(m_list_chunkInfo.begin(), m_list_chunkInfo.end(),
+			[](const ChunkInfo& chunk) { return chunk.mem != VK_NULL_HANDLE; }));
+	}
+	uint32 getEmptyChunkBytes() const { return ChunkedHeap<>::getEmptyChunkBytes(); }
+	uint32 releaseEmptyChunks() { return ChunkedHeap<>::releaseEmptyChunks(); }
+	void allowNewChunkAllocation() { ChunkedHeap<>::allowNewChunkAllocation(); }
 
   private:
 	uint32 allocateNewChunk(uint32 chunkIndex, uint32 minimumAllocationSize) override;
+	uint32 allocateDedicatedChunk(uint32 chunkIndex, uint32 minimumAllocationSize) override;
+	uint32 allocateChunkMemory(uint32 chunkIndex, uint32 minimumAllocationSize,
+		bool dedicated);
+	bool releaseChunk(uint32 chunkIndex) override;
 
 	uint32 m_typeFilter{ 0xFFFFFFFF };
 	class VKRMemoryManager* m_vkrMemoryManager;
@@ -187,9 +215,11 @@ public:
 	void FlushReservation(AllocatorReservation_t& uploadReservation);
 	void FlushPendingRanges();
 	void CleanupBuffer(uint64 latestFinishedCommandBufferId);
+	size_t TrimAfterGpuIdle();
 	VkBuffer GetBufferByIndex(uint32 index) const;
 
 	void GetStats(uint32& numBuffers, size_t& totalBufferSize, size_t& freeBufferSize) const;
+	size_t GetTrimmableBytes() const;
 
 private:
 	AllocatorReservation_t allocateBufferMemory(uint32 size, uint32 alignment, bool didReclaim);
@@ -285,6 +315,8 @@ public:
 		m_textureUploadBuffer.clear();
 	}
 
+	size_t ReleaseTextureUploadBufferCapacity();
+
 	void FlushPendingRanges()
 	{
 		m_stagingBuffer.FlushPendingRanges();
@@ -320,6 +352,9 @@ public:
 
 	// overlay info
 	void appendOverlayHeapDebugInfo();
+#if defined(__SWITCH__)
+	void PrepareTextureAllocation(size_t allocationSize);
+#endif
 
 	private:
 		class VulkanRenderer* m_vkr;

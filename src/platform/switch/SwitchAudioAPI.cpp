@@ -6,6 +6,7 @@ extern "C" {
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -13,9 +14,11 @@ extern "C" {
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "audio/SwitchAudioAPI.h"
+#include "util/helpers/helpers.h"
 
 namespace
 {
@@ -62,11 +65,21 @@ class SwitchAudioMixer
 			buffer.buffer_size = kOutputBufferBytes;
 			m_freeBuffers.push_back(&buffer);
 		}
+		try
+		{
+			m_worker = std::thread(&SwitchAudioMixer::WorkerMain, this);
+		}
+		catch (...)
+		{
+			ReleaseMemory();
+			return false;
+		}
 		return true;
 	}
 
 	~SwitchAudioMixer()
 	{
+		StopWorker();
 		ReleaseMemory();
 	}
 
@@ -75,6 +88,7 @@ class SwitchAudioMixer
 		std::scoped_lock lock(m_mutex);
 		endpoint->samples.resize(static_cast<size_t>(kMaxQueuedFrames) * kOutputChannels);
 		m_endpoints.push_back(endpoint);
+		NotifyWorker();
 	}
 
 	void Remove(SwitchAudioEndpoint* endpoint)
@@ -85,13 +99,16 @@ class SwitchAudioMixer
 		std::erase(m_endpoints, endpoint);
 		if (!AnyEndpointPlaying())
 			StopHardware();
+		NotifyWorker();
 	}
 
 	bool Play(SwitchAudioEndpoint& endpoint)
 	{
 		std::scoped_lock lock(m_mutex);
 		endpoint.playing = true;
-		return !m_applicationActive || StartHardware();
+		const bool success = !m_applicationActive || StartHardware();
+		NotifyWorker();
+		return success;
 	}
 
 	bool Stop(SwitchAudioEndpoint& endpoint)
@@ -99,13 +116,16 @@ class SwitchAudioMixer
 		std::scoped_lock lock(m_mutex);
 		endpoint.playing = false;
 		ClearQueue(endpoint);
-		return AnyEndpointPlaying() || StopHardware();
+		const bool success = AnyEndpointPlaying() || StopHardware();
+		NotifyWorker();
+		return success;
 	}
 
 	void SetVolume(SwitchAudioEndpoint& endpoint, sint32 volume)
 	{
 		std::scoped_lock lock(m_mutex);
 		endpoint.volume = std::clamp(volume, 0, 100);
+		NotifyWorker();
 	}
 
 	void SetApplicationActive(bool active)
@@ -124,13 +144,14 @@ class SwitchAudioMixer
 		{
 			StartHardware();
 		}
+		NotifyWorker();
 	}
 
 	bool NeedsBlocks(const SwitchAudioEndpoint& endpoint, uint32 delay)
 	{
 		std::scoped_lock lock(m_mutex);
-		ReclaimBuffers();
-		Pump();
+		if (ReclaimBuffers())
+			NotifyWorker();
 		if (!m_applicationActive || !endpoint.playing)
 			return false;
 		const uint32 wantedFrames = std::max(endpoint.framesPerBlock, 1U) * std::max(delay, 1U);
@@ -148,26 +169,61 @@ class SwitchAudioMixer
 		const uint32 frames = ConvertToStereo(endpoint, data);
 		if (frames == 0)
 			return false;
-
-		if (m_freeBuffers.empty())
-			ReclaimBuffers();
-		Pump();
+		NotifyWorker();
 		return true;
 	}
 
 	void Shutdown()
 	{
-		std::scoped_lock lock(m_mutex);
-		m_applicationActive = false;
-		for (auto* endpoint : m_endpoints)
 		{
-			endpoint->playing = false;
-			ClearQueue(*endpoint);
+			std::scoped_lock lock(m_mutex);
+			m_applicationActive = false;
+			for (auto* endpoint : m_endpoints)
+			{
+				endpoint->playing = false;
+				ClearQueue(*endpoint);
+			}
+			StopHardware();
+			m_workerShutdown = true;
+			NotifyWorker();
 		}
-		StopHardware();
+		if (m_worker.joinable())
+			m_worker.join();
 	}
 
   private:
+	void NotifyWorker()
+	{
+		m_workPending = true;
+		m_wake.notify_one();
+	}
+
+	void StopWorker()
+	{
+		{
+			std::scoped_lock lock(m_mutex);
+			m_workerShutdown = true;
+			NotifyWorker();
+		}
+		if (m_worker.joinable())
+			m_worker.join();
+	}
+
+	void WorkerMain()
+	{
+		SetThreadName("SwitchAudio");
+		std::unique_lock lock(m_mutex);
+		while (!m_workerShutdown)
+		{
+			m_wake.wait(lock, [&] { return m_workerShutdown || m_workPending; });
+			if (m_workerShutdown)
+				break;
+			m_workPending = false;
+			ReclaimBuffers();
+			Pump();
+		}
+	}
+
 	void ReleaseMemory()
 	{
 		for (void*& memory : m_memory)
@@ -177,16 +233,19 @@ class SwitchAudioMixer
 		}
 	}
 
-	void ReclaimBuffers()
+	bool ReclaimBuffers()
 	{
+		bool reclaimed = false;
 		AudioOutBuffer* released = nullptr;
 		u32 count = 0;
 		while (R_SUCCEEDED(audoutGetReleasedAudioOutBuffer(&released, &count)) && count > 0 && released)
 		{
 			m_freeBuffers.push_back(released);
+			reclaimed = true;
 			released = nullptr;
 			count = 0;
 		}
+		return reclaimed;
 	}
 
 	void ResetFreeBuffers()
@@ -260,13 +319,49 @@ class SwitchAudioMixer
 		const size_t sample = endpoint.readFrame * kOutputChannels;
 		left = endpoint.samples[sample];
 		right = endpoint.samples[sample + 1];
-		endpoint.readFrame = (endpoint.readFrame + 1) % kMaxQueuedFrames;
+		if (++endpoint.readFrame == kMaxQueuedFrames)
+			endpoint.readFrame = 0;
 		--endpoint.queuedFrames;
 		if (endpoint.frontBlockFrames > 0)
 			--endpoint.frontBlockFrames;
 		if (endpoint.frontBlockFrames == 0 && endpoint.queuedFrames > 0)
 			endpoint.frontBlockFrames = std::min(endpoint.framesPerBlock, endpoint.queuedFrames);
 		return true;
+	}
+
+	static void CopyScaledSamples(sint16* output, const sint16* input, size_t sampleCount, sint32 volume)
+	{
+		if (volume == 100)
+		{
+			std::memcpy(output, input, sampleCount * sizeof(sint16));
+			return;
+		}
+		if (volume == 0)
+		{
+			std::memset(output, 0, sampleCount * sizeof(sint16));
+			return;
+		}
+		for (size_t i = 0; i < sampleCount; ++i)
+			output[i] = static_cast<sint16>((static_cast<sint32>(input[i]) * volume) / 100);
+	}
+
+	static void ConsumeFramesSingle(SwitchAudioEndpoint& endpoint, sint16* output, uint32 frames)
+	{
+		const uint32 firstFrames = std::min<uint32>(frames,
+			kMaxQueuedFrames - static_cast<uint32>(endpoint.readFrame));
+		CopyScaledSamples(output, endpoint.samples.data() + endpoint.readFrame * kOutputChannels,
+			static_cast<size_t>(firstFrames) * kOutputChannels, endpoint.volume);
+		const uint32 remainingFrames = frames - firstFrames;
+		if (remainingFrames > 0)
+		{
+			CopyScaledSamples(output + firstFrames * kOutputChannels, endpoint.samples.data(),
+				static_cast<size_t>(remainingFrames) * kOutputChannels, endpoint.volume);
+		}
+		endpoint.readFrame = (endpoint.readFrame + frames) % kMaxQueuedFrames;
+		endpoint.queuedFrames -= frames;
+		endpoint.frontBlockFrames -= frames;
+		if (endpoint.frontBlockFrames == 0 && endpoint.queuedFrames > 0)
+			endpoint.frontBlockFrames = std::min(endpoint.framesPerBlock, endpoint.queuedFrames);
 	}
 
 	static uint32 ConvertToStereo(SwitchAudioEndpoint& endpoint, const sint16* input)
@@ -352,6 +447,20 @@ class SwitchAudioMixer
 		return nullptr;
 	}
 
+	SwitchAudioEndpoint* FindSingleEndpoint() const
+	{
+		SwitchAudioEndpoint* single = nullptr;
+		for (auto* endpoint : m_endpoints)
+		{
+			if (!endpoint->playing)
+				continue;
+			if (single)
+				return nullptr;
+			single = endpoint;
+		}
+		return single;
+	}
+
 	bool MainStreamsReady(uint32 frames) const
 	{
 		uint32 largestQueued = 0;
@@ -383,23 +492,33 @@ class SwitchAudioMixer
 			AudioOutBuffer* buffer = m_freeBuffers.front();
 			m_freeBuffers.pop_front();
 			auto* output = static_cast<sint16*>(buffer->buffer);
-			for (uint32 frame = 0; frame < frames; ++frame)
+			SwitchAudioEndpoint* single = FindSingleEndpoint();
+			if (single == leader)
 			{
-				sint64 mixedLeft = 0;
-				sint64 mixedRight = 0;
-				for (auto* endpoint : m_endpoints)
+				ConsumeFramesSingle(*single, output, frames);
+			}
+			else
+			{
+				for (uint32 frame = 0; frame < frames; ++frame)
 				{
-					if (!endpoint->playing)
-						continue;
-					sint16 left = 0;
-					sint16 right = 0;
-					if (!ConsumeFrame(*endpoint, left, right))
-						continue;
-					mixedLeft += (static_cast<sint64>(left) * endpoint->volume) / 100;
-					mixedRight += (static_cast<sint64>(right) * endpoint->volume) / 100;
+					sint32 mixedLeft = 0;
+					sint32 mixedRight = 0;
+					for (auto* endpoint : m_endpoints)
+					{
+						if (!endpoint->playing)
+							continue;
+						sint16 left = 0;
+						sint16 right = 0;
+						if (!ConsumeFrame(*endpoint, left, right))
+							continue;
+						mixedLeft += static_cast<sint32>(left) * endpoint->volume;
+						mixedRight += static_cast<sint32>(right) * endpoint->volume;
+					}
+					mixedLeft /= 100;
+					mixedRight /= 100;
+					output[frame * 2] = static_cast<sint16>(std::clamp<sint32>(mixedLeft, -32768, 32767));
+					output[frame * 2 + 1] = static_cast<sint16>(std::clamp<sint32>(mixedRight, -32768, 32767));
 				}
-				output[frame * 2] = static_cast<sint16>(std::clamp<sint64>(mixedLeft, -32768, 32767));
-				output[frame * 2 + 1] = static_cast<sint16>(std::clamp<sint64>(mixedRight, -32768, 32767));
 			}
 
 			buffer->data_size = static_cast<size_t>(frames) * kOutputChannels * sizeof(sint16);
@@ -418,8 +537,12 @@ class SwitchAudioMixer
 	std::deque<AudioOutBuffer*> m_freeBuffers;
 	std::vector<SwitchAudioEndpoint*> m_endpoints;
 	std::mutex m_mutex;
+	std::condition_variable m_wake;
+	std::thread m_worker;
 	bool m_started{};
 	bool m_applicationActive{true};
+	bool m_workerShutdown{};
+	bool m_workPending{};
 };
 
 std::unique_ptr<SwitchAudioMixer> s_mixer;

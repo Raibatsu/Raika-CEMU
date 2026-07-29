@@ -8,7 +8,7 @@ endif
 TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
 
-TARGET		:=	Cemu
+TARGET		:=	cemu
 BUILD		:=	build
 SOURCES		:=	source ../src/platform/switch/common
 DATA		:=	data
@@ -17,10 +17,12 @@ INCLUDES	:=	include ../src/platform/switch/common \
 			../build_switch/_deps/libsmb2-src/include \
 			../build_switch/_deps/libusbhsfs-src/include
 ROMFS		:=	romfs		# emulator and forwarder payloads
+ICON		:=	Cemu.jpg
 
 APP_TITLE	:=	Cemu
 APP_AUTHOR	:=	naga
-APP_VERSION	:=	2.6
+RELEASE_VERSION	?=	1.1.0
+APP_VERSION	?=	$(RELEASE_VERSION)
 
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
@@ -28,8 +30,13 @@ PKGS	:=	sdl2 SDL2_ttf SDL2_image libcurl
 
 CFLAGS	:=	`$(PREFIX)pkg-config --cflags $(PKGS)` -Wall -Wextra -O2 -DNDEBUG -ffunction-sections \
 			-fno-ident -ffile-prefix-map=$(CURDIR)=. -fmacro-prefix-map=$(CURDIR)=. \
-			-DCEMU_SWITCH_VERSION='"$(APP_VERSION)"' $(ARCH) $(DEFINES)
+			-DCEMU_SWITCH_VERSION='"$(APP_VERSION)"' \
+			-DCEMU_SWITCH_RELEASE_VERSION='"$(RELEASE_VERSION)"' $(ARCH) $(DEFINES)
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__ -D_GNU_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
+
+ifeq ($(UPDATE_TEST),1)
+CFLAGS	+=	-DCEMU_SWITCH_UPDATE_TEST
+endif
 
 CXXFLAGS	:= $(CFLAGS) -std=gnu++17
 
@@ -42,7 +49,14 @@ STORAGE_LIBS := $(TOPDIR)/../build_switch/_deps/libsmb2-build/lib/libsmb2.a \
 ARCHIVE_LIBS := $(TOPDIR)/../build_switch/dependencies/ZArchive/libzarchive.a
 LIBS	:=	$(STORAGE_LIBS) $(ARCHIVE_LIBS) `$(PREFIX)pkg-config --libs $(PKGS)` -lturbojpeg -lzstd -lz -lGLESv2 -lnx
 
-LIBDIRS	:= $(PORTLIBS) $(LIBNX)
+STAGED_MESA20 := $(TOPDIR)/../build_switch/launcher_mesa20/opt/devkitpro/portlibs/switch
+ifneq ($(wildcard $(STAGED_MESA20)/lib/libGLESv2.a),)
+LAUNCHER_MESA20_ROOT ?= $(STAGED_MESA20)
+else
+LAUNCHER_MESA20_ROOT ?= $(PORTLIBS)
+endif
+
+LIBDIRS	:= $(LAUNCHER_MESA20_ROOT) $(PORTLIBS) $(LIBNX)
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 

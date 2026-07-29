@@ -485,6 +485,7 @@ private:
 		{
 			uint32 minUniformBufferOffsetAlignment = 256;
 			uint32 nonCoherentAtomSize = 256;
+			uint32 optimalBufferCopyOffsetAlignment = 256;
 			// calculated
 			uint32 calcUniformBufferAlignmentM1{};
 		}limits;
@@ -572,7 +573,7 @@ private:
 	// misc
 	void CreatePipelineCache();
 	VkPipelineShaderStageCreateInfo CreatePipelineShaderStageCreateInfo(VkShaderStageFlagBits stage, VkShaderModule& module, const char* entryName) const;
-	VkPipeline backbufferBlit_createGraphicsPipeline(VkDescriptorSetLayout descriptorLayout, bool padView, RendererOutputShader* shader);
+	VkPipeline backbufferBlit_createGraphicsPipeline(VkDescriptorSetLayout descriptorLayout, bool padView, bool mainWindow, RendererOutputShader* shader);
 	bool AcquireNextSwapchainImage(bool mainWindow);
 	void RecreateSwapchain(bool mainWindow, bool skipCreate = false);
 
@@ -630,6 +631,9 @@ private:
 	VkDeviceMemory m_textureReadbackBufferMemory = VK_NULL_HANDLE;
 	uint8* m_textureReadbackBufferPtr = nullptr;
 	uint32 m_textureReadbackBufferWriteIndex = 0;
+#if defined(__SWITCH__)
+	VKRSynchronizedRingAllocator::AllocatorReservation_t m_textureUploadReservation{};
+#endif
 
 	// placeholder objects to simulate NULL buffers and textures
 	struct NullTexture
@@ -969,6 +973,7 @@ public:
 	bool IsTracingToolEnabled() const { return m_featureControl.usingTracingTool; }
 	bool UseAttachmentFeedbackLoop() const { return m_featureControl.deviceExtensions.attachment_feedback_loop_dynamic_state; }
 	uint32 GetNonCoherentAtomSize() const { return m_featureControl.limits.nonCoherentAtomSize; }
+	uint32 GetOptimalBufferCopyOffsetAlignment() const { return m_featureControl.limits.optimalBufferCopyOffsetAlignment; }
 
 private:
 

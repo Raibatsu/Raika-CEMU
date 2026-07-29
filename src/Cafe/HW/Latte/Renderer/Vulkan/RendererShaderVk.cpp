@@ -5,7 +5,6 @@
 #include "config/CemuConfig.h"
 #include "util/helpers/ConcurrentQueue.h"
 #include "Cemu/FileCache/FileCache.h"
-
 #include <glslang/Public/ShaderLang.h>
 #include <glslang/SPIRV/GlslangToSpv.h>
 #include "util/helpers/helpers.h"

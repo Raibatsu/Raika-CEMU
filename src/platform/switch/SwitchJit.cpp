@@ -1,4 +1,5 @@
 #include <switch.h>
+#include <array>
 #include <map>
 #include <mutex>
 #include <unordered_map>
@@ -7,23 +8,113 @@
 
 namespace
 {
-	Jit s_jit{};
+	struct JitArena
+	{
+		Jit jit{};
+		uint8_t* rwBase = nullptr;
+		uint8_t* rxBase = nullptr;
+		size_t size = 0;
+		size_t cursor = 0;
+		std::map<size_t, size_t> freeBlocks;
+	};
+
+	struct JitAllocation
+	{
+		size_t arenaIndex;
+		size_t size;
+	};
+
+	constexpr size_t kMaxArenaCount = 2;
+	std::array<JitArena, kMaxArenaCount> s_arenas{};
+	size_t s_arenaCount = 0;
+	size_t s_arenaSize = 0;
 	bool s_ready = false;
-	uint8_t* s_rwBase = nullptr;
-	size_t s_size = 0;
-	size_t s_cursor = 0;
-	std::map<size_t, size_t> s_freeBlocks;
-	std::unordered_map<uintptr_t, size_t> s_allocations;
+	std::unordered_map<uintptr_t, JitAllocation> s_allocations;
 	std::mutex s_mutex;
-	uintptr_t s_rxDelta = 0;
 
 	constexpr size_t kCodeAlignment = 16;
+
 	bool AlignCodeSize(size_t size, size_t& alignedSize)
 	{
 		if (size == 0 || size > SIZE_MAX - (kCodeAlignment - 1))
 			return false;
 		alignedSize = (size + kCodeAlignment - 1) & ~(kCodeAlignment - 1);
 		return true;
+	}
+
+	bool CreateArena(size_t size)
+	{
+		if (s_arenaCount >= kMaxArenaCount)
+			return false;
+
+		JitArena& arena = s_arenas[s_arenaCount];
+		arena = {};
+		Result rc = jitCreate(&arena.jit, size);
+		if (R_FAILED(rc))
+		{
+			arena = {};
+			return false;
+		}
+		if (arena.jit.type != JitType_CodeMemory)
+		{
+			jitClose(&arena.jit);
+			arena = {};
+			return false;
+		}
+		rc = jitTransitionToExecutable(&arena.jit);
+		if (R_FAILED(rc))
+		{
+			jitClose(&arena.jit);
+			arena = {};
+			return false;
+		}
+
+		arena.rwBase = static_cast<uint8_t*>(jitGetRwAddr(&arena.jit));
+		arena.rxBase = static_cast<uint8_t*>(jitGetRxAddr(&arena.jit));
+		if (!arena.rwBase || !arena.rxBase)
+		{
+			jitClose(&arena.jit);
+			arena = {};
+			return false;
+		}
+
+		arena.size = size;
+		arena.cursor = 0;
+		arena.freeBlocks.clear();
+		++s_arenaCount;
+		return true;
+	}
+
+	void* AllocateFromArena(size_t arenaIndex, size_t size)
+	{
+		JitArena& arena = s_arenas[arenaIndex];
+		for (auto it = arena.freeBlocks.begin(); it != arena.freeBlocks.end(); ++it)
+		{
+			if (it->second < size)
+				continue;
+			const size_t offset = it->first;
+			const size_t blockSize = it->second;
+			arena.freeBlocks.erase(it);
+			if (blockSize > size)
+				arena.freeBlocks.emplace(offset + size, blockSize - size);
+			void* address = arena.rwBase + offset;
+			s_allocations.emplace(reinterpret_cast<uintptr_t>(address), JitAllocation{arenaIndex, size});
+			return address;
+		}
+
+		if (arena.cursor > arena.size || size > arena.size - arena.cursor)
+			return nullptr;
+
+		void* address = arena.rwBase + arena.cursor;
+		arena.cursor += size;
+		s_allocations.emplace(reinterpret_cast<uintptr_t>(address), JitAllocation{arenaIndex, size});
+		return address;
+	}
+
+	bool ContainsAddress(uintptr_t address, const uint8_t* base, size_t size)
+	{
+		const uintptr_t begin = reinterpret_cast<uintptr_t>(base);
+		return address >= begin && address - begin < size;
 	}
 }
 
@@ -42,32 +133,9 @@ bool SwitchJit_InitCodeArena(size_t size)
 	if (!SwitchJit_SyscallsAvailable())
 		return false;
 
-	Result rc = jitCreate(&s_jit, size);
-	if (R_FAILED(rc))
+	if (!CreateArena(size))
 		return false;
-	if (s_jit.type != JitType_CodeMemory)
-	{
-		jitClose(&s_jit);
-		return false;
-	}
-	rc = jitTransitionToExecutable(&s_jit);
-	if (R_FAILED(rc))
-	{
-		jitClose(&s_jit);
-		return false;
-	}
-	s_rwBase = static_cast<uint8_t*>(jitGetRwAddr(&s_jit));
-	void* rxBase = jitGetRxAddr(&s_jit);
-	if (!s_rwBase || !rxBase)
-	{
-		jitClose(&s_jit);
-		s_rwBase = nullptr;
-		return false;
-	}
-	s_rxDelta = reinterpret_cast<uintptr_t>(rxBase) - reinterpret_cast<uintptr_t>(s_rwBase);
-	s_size = size;
-	s_cursor = 0;
-	s_freeBlocks.clear();
+	s_arenaSize = size;
 	s_allocations.clear();
 	s_ready = true;
 	return true;
@@ -76,17 +144,18 @@ bool SwitchJit_InitCodeArena(size_t size)
 void SwitchJit_Shutdown()
 {
 	std::lock_guard<std::mutex> lock(s_mutex);
-	if (!s_ready || R_FAILED(jitClose(&s_jit)))
+	if (!s_ready)
 		return;
 
-	s_jit = {};
+	for (size_t i = 0; i < s_arenaCount; ++i)
+	{
+		jitClose(&s_arenas[i].jit);
+		s_arenas[i] = {};
+	}
+	s_arenaCount = 0;
+	s_arenaSize = 0;
 	s_ready = false;
-	s_rwBase = nullptr;
-	s_size = 0;
-	s_cursor = 0;
-	s_freeBlocks.clear();
 	s_allocations.clear();
-	s_rxDelta = 0;
 }
 
 void* SwitchJit_AllocRw(size_t size)
@@ -97,27 +166,15 @@ void* SwitchJit_AllocRw(size_t size)
 	if (!AlignCodeSize(size, size))
 		return nullptr;
 
-	for (auto it = s_freeBlocks.begin(); it != s_freeBlocks.end(); ++it)
+	for (size_t i = 0; i < s_arenaCount; ++i)
 	{
-		if (it->second < size)
-			continue;
-		const size_t offset = it->first;
-		const size_t blockSize = it->second;
-		s_freeBlocks.erase(it);
-		if (blockSize > size)
-			s_freeBlocks.emplace(offset + size, blockSize - size);
-		void* address = s_rwBase + offset;
-		s_allocations.emplace(reinterpret_cast<uintptr_t>(address), size);
-		return address;
+		if (void* address = AllocateFromArena(i, size))
+			return address;
 	}
 
-	if (s_cursor > s_size || size > s_size - s_cursor)
+	if (size > s_arenaSize || s_arenaCount >= kMaxArenaCount || !CreateArena(s_arenaSize))
 		return nullptr;
-
-	void* p = s_rwBase + s_cursor;
-	s_cursor += size;
-	s_allocations.emplace(reinterpret_cast<uintptr_t>(p), size);
-	return p;
+	return AllocateFromArena(s_arenaCount - 1, size);
 }
 
 bool SwitchJit_FreeRw(void* address)
@@ -129,42 +186,51 @@ bool SwitchJit_FreeRw(void* address)
 		return false;
 
 	uintptr_t ptr = reinterpret_cast<uintptr_t>(address);
-	const uintptr_t rwBegin = reinterpret_cast<uintptr_t>(s_rwBase);
-	const uintptr_t rxBegin = reinterpret_cast<uintptr_t>(SwitchJit_RwToRx(s_rwBase));
-	if (ptr >= rxBegin && ptr - rxBegin < s_size)
-		ptr = rwBegin + (ptr - rxBegin);
+	for (size_t i = 0; i < s_arenaCount; ++i)
+	{
+		const JitArena& arena = s_arenas[i];
+		if (ContainsAddress(ptr, arena.rxBase, arena.size))
+		{
+			ptr = reinterpret_cast<uintptr_t>(arena.rwBase) +
+				(ptr - reinterpret_cast<uintptr_t>(arena.rxBase));
+			break;
+		}
+	}
 
 	auto allocation = s_allocations.find(ptr);
 	if (allocation == s_allocations.end())
 		return false;
 
+	const size_t arenaIndex = allocation->second.arenaIndex;
+	JitArena& arena = s_arenas[arenaIndex];
+	const uintptr_t rwBegin = reinterpret_cast<uintptr_t>(arena.rwBase);
 	size_t begin = ptr - rwBegin;
-	const size_t allocationSize = allocation->second;
+	const size_t allocationSize = allocation->second.size;
 	size_t end = begin + allocationSize;
 	s_allocations.erase(allocation);
 
-	auto next = s_freeBlocks.lower_bound(begin);
-	if (next != s_freeBlocks.begin())
+	auto next = arena.freeBlocks.lower_bound(begin);
+	if (next != arena.freeBlocks.begin())
 	{
 		auto previous = std::prev(next);
 		if (previous->first + previous->second == begin)
 		{
 			begin = previous->first;
-			s_freeBlocks.erase(previous);
+			arena.freeBlocks.erase(previous);
 		}
 	}
-	next = s_freeBlocks.lower_bound(begin);
-	if (next != s_freeBlocks.end() && end == next->first)
+	next = arena.freeBlocks.lower_bound(begin);
+	if (next != arena.freeBlocks.end() && end == next->first)
 	{
 		end += next->second;
-		s_freeBlocks.erase(next);
+		arena.freeBlocks.erase(next);
 	}
-	if (end == s_cursor)
+	if (end == arena.cursor)
 	{
-		s_cursor = begin;
+		arena.cursor = begin;
 		return true;
 	}
-	s_freeBlocks.emplace(begin, end - begin);
+	arena.freeBlocks.emplace(begin, end - begin);
 	return true;
 }
 
@@ -174,12 +240,24 @@ void SwitchJit_FlushCode(void* rwAddr, size_t size)
 		return;
 	armDCacheClean(rwAddr, size);
 	void* rxAddr = SwitchJit_RwToRx(rwAddr);
-	armICacheInvalidate(rxAddr, size);
+	if (rxAddr)
+		armICacheInvalidate(rxAddr, size);
 }
 
 void* SwitchJit_RwToRx(void* rw)
 {
-	return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(rw) + s_rxDelta);
+	if (!rw)
+		return nullptr;
+	std::lock_guard<std::mutex> lock(s_mutex);
+	const uintptr_t address = reinterpret_cast<uintptr_t>(rw);
+	for (size_t i = 0; i < s_arenaCount; ++i)
+	{
+		const JitArena& arena = s_arenas[i];
+		if (!ContainsAddress(address, arena.rwBase, arena.size))
+			continue;
+		return arena.rxBase + (address - reinterpret_cast<uintptr_t>(arena.rwBase));
+	}
+	return nullptr;
 }
 
 void SwitchJit_PinThreadToCore(int coreIndex)

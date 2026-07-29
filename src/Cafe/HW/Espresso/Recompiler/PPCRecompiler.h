@@ -7,7 +7,11 @@
 
 #define PPC_REC_ALIGN_TO_4MB(__v)	(((__v)+4*1024*1024-1)&~(4*1024*1024-1))
 
+#if defined(__SWITCH__)
+static constexpr uint32 PPC_REC_LOOKUP_BLOCK_SIZE = 1 * 1024 * 1024;
+#else
 static constexpr uint32 PPC_REC_LOOKUP_BLOCK_SIZE = 4 * 1024 * 1024;
+#endif
 static constexpr uint32 PPC_REC_LOOKUP_BLOCK_COUNT =
 	(PPC_REC_CODE_AREA_SIZE + PPC_REC_LOOKUP_BLOCK_SIZE - 1) / PPC_REC_LOOKUP_BLOCK_SIZE;
 static constexpr uint32 PPC_REC_LOOKUP_ENTRIES_PER_BLOCK = PPC_REC_LOOKUP_BLOCK_SIZE / 4;
@@ -141,7 +145,7 @@ struct PPCRecompilerInstanceData_t
 	PPCREC_JUMP_ENTRY ppcRecompilerDirectJumpTable[PPC_REC_ALIGN_TO_4MB(PPC_REC_CODE_AREA_SIZE/4)]; // lookup table for ppc offset to native code function
 #endif
 
-	PPCREC_JUMP_ENTRY& GetJumpTableEntry(uint32 ppcAddress)
+	PPCREC_JUMP_ENTRY GetJumpTableEntry(uint32 ppcAddress) const
 	{
 #if defined(__SWITCH__)
 		const uint32 blockIndex = ppcAddress / PPC_REC_LOOKUP_BLOCK_SIZE;
@@ -151,6 +155,18 @@ struct PPCRecompilerInstanceData_t
 		return ppcRecompilerDirectJumpTable[ppcAddress / 4];
 #endif
 	}
+
+#if defined(__SWITCH__)
+	bool EnsureWritableJumpTableEntry(uint32 ppcAddress);
+	bool SetJumpTableEntry(uint32 ppcAddress, PPCREC_JUMP_ENTRY entry);
+#else
+	bool EnsureWritableJumpTableEntry(uint32 ppcAddress) { return true; }
+	bool SetJumpTableEntry(uint32 ppcAddress, PPCREC_JUMP_ENTRY entry)
+	{
+		ppcRecompilerDirectJumpTable[ppcAddress / 4] = entry;
+		return true;
+	}
+#endif
 
 	// x64 data
 	alignas(16) uint64 _x64XMM_xorNegateMaskBottom[2];

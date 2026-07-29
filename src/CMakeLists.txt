@@ -68,6 +68,21 @@ add_subdirectory(imgui)
 add_subdirectory(resource)
 
 if(PLATFORM_SWITCH)
+	file(GLOB_RECURSE SWITCH_LSFG_SOURCES CONFIGURE_DEPENDS
+		"${CMAKE_SOURCE_DIR}/third_party/lsfg-vk/lsfg-vk-common/src/*.cpp"
+		"${CMAKE_SOURCE_DIR}/third_party/lsfg-vk/lsfg-vk-backend/src/*.cpp")
+	add_library(SwitchLsfgBackend STATIC
+		platform/switch/lsfg/lsfg_bridge.cpp
+		${SWITCH_LSFG_SOURCES})
+	target_include_directories(SwitchLsfgBackend PRIVATE
+		"${CMAKE_SOURCE_DIR}/src/platform/switch/lsfg"
+		"${CMAKE_SOURCE_DIR}/third_party/lsfg-vk/lsfg-vk-common/include"
+		"${CMAKE_SOURCE_DIR}/third_party/lsfg-vk/lsfg-vk-backend/include"
+		"${CMAKE_SOURCE_DIR}/third_party/lsfg-vk/lsfg-vk-backend/src")
+	target_compile_definitions(SwitchLsfgBackend PRIVATE
+		VK_USE_PLATFORM_VI_NN
+		CEMU_LSFG_VULKAN_DISPATCH)
+
 	add_executable(CemuBin
 		platform/switch/main_switch.cpp
 		platform/switch/WindowSystemSwitch.cpp
@@ -77,6 +92,8 @@ if(PLATFORM_SWITCH)
 		platform/switch/SwitchInput.cpp
 		platform/switch/SwitchAmiibo.cpp
 		platform/switch/SwitchOverlay.cpp
+		platform/switch/SwitchLSFG.cpp
+		platform/switch/SwitchToys.cpp
 		platform/switch/SwitchSwkbd.cpp
 		platform/switch/common/SwitchPosixCompat.cpp
 		platform/switch/common/SwitchStorage.cpp
@@ -263,7 +280,7 @@ endif()
 if (PLATFORM_SWITCH)
 	set(SWITCH_LTO_JOBS "auto" CACHE STRING "Parallel GCC LTO jobs for the Switch link")
 	# The headless build still consumes fonts through imgui.
-	target_link_libraries(CemuBin PRIVATE SwitchVulkanDriver imguiImpl
+	target_link_libraries(CemuBin PRIVATE SwitchVulkanDriver SwitchLsfgBackend imguiImpl
 		smb2 libusbhsfs
 		"-Wl,--whole-archive" CemuResource "-Wl,--no-whole-archive")
 	target_link_options(CemuBin PRIVATE "-flto=${SWITCH_LTO_JOBS}")
@@ -291,12 +308,12 @@ if (PLATFORM_SWITCH)
 		DKP_ASSET_FILES "${SWITCH_ROMFS_STAMP}")
 
 	nx_generate_nacp(OUTPUT "${CMAKE_BINARY_DIR}/Cemu.nacp"
-		NAME "Cemu"
+		NAME "Cemu Core"
 		AUTHOR "naga"
-		VERSION "2.6")
+		VERSION "${EMULATOR_VERSION_MAJOR}.${EMULATOR_VERSION_MINOR}.${EMULATOR_VERSION_PATCH}")
 	nx_create_nro(CemuNro
 		TARGET CemuBin
-		OUTPUT "${CMAKE_SOURCE_DIR}/bin/Cemu.nro"
+		OUTPUT "${CMAKE_SOURCE_DIR}/bin/cemu_core.nro"
 		NACP "${CMAKE_BINARY_DIR}/Cemu.nacp"
 		ICON "${CMAKE_SOURCE_DIR}/dist/switch/icon.jpg"
 		ROMFS SwitchRomfs)

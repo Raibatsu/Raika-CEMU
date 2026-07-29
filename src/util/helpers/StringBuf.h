@@ -1,14 +1,25 @@
 #pragma once
 
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <new>
+#include <stdexcept>
+#include <string_view>
+
 class StringBuf
 {
 public:
 	StringBuf(uint32 bufferSize)
 	{
-		this->str = (uint8*)malloc(bufferSize + 4);
+		this->str = static_cast<uint8*>(malloc(static_cast<size_t>(bufferSize) + 4));
+		if (!this->str)
+			throw std::bad_alloc();
 		this->allocated = true;
 		this->length = 0;
 		this->limit = bufferSize;
+		this->str[0] = '\0';
 	}
 
 	~StringBuf()
@@ -20,42 +31,50 @@ public:
 	template<typename TFmt, typename ... TArgs>
 	void addFmt(const TFmt& format, TArgs&&... args)
 	{
-		auto r = fmt::vformat_to_n((char*)(this->str + this->length), (size_t)(this->limit - this->length), fmt::detail::to_string_view(format), fmt::make_format_args(args...));
-		this->length += (uint32)r.size;
+		const auto formatView = fmt::detail::to_string_view(format);
+		size_t available = this->limit - this->length;
+		auto result = fmt::vformat_to_n(reinterpret_cast<char*>(this->str + this->length),
+			available, formatView, fmt::make_format_args(args...));
+		if (result.size > available)
+		{
+			_ensureCapacity(result.size);
+			result = fmt::vformat_to_n(reinterpret_cast<char*>(this->str + this->length),
+				this->limit - this->length, formatView, fmt::make_format_args(args...));
+		}
+		this->length += static_cast<uint32>(result.size);
+		this->str[this->length] = '\0';
 	}
 
 	void add(const char* appendedStr)
 	{
-		const char* outputStart = (char*)(this->str + this->length);
-		char* output = (char*)outputStart;
-		const char* outputEnd = (char*)(this->str + this->limit - 1);
-		while (output < outputEnd)
+		while (true)
 		{
-			char c = *appendedStr;
+			const char c = *appendedStr++;
 			if (c == '\0')
-				break;
-			*output = c;
-			appendedStr++;
-			output++;
+			{
+				this->str[this->length] = '\0';
+				return;
+			}
+			if (this->length == this->limit)
+				_ensureCapacity(1);
+			this->str[this->length++] = static_cast<uint8>(c);
 		}
-		this->length += (uint32)(output - outputStart);
-		*output = '\0';
 	}
 
 	void add(std::string_view appendedStr)
 	{
-		size_t copyLen = appendedStr.size();
-		if (this->length + copyLen + 1 >= this->limit)
-			_reserve(std::max<uint32>(this->length + copyLen + 64, this->limit + this->limit / 2));
-		char* outputStart = (char*)(this->str + this->length);
-		std::copy(appendedStr.data(), appendedStr.data() + copyLen, outputStart);
-		length += copyLen;
-		outputStart[copyLen] = '\0';
+		const size_t copyLen = appendedStr.size();
+		_ensureCapacity(copyLen);
+		if (copyLen != 0)
+			memcpy(this->str + this->length, appendedStr.data(), copyLen);
+		this->length += static_cast<uint32>(copyLen);
+		this->str[this->length] = '\0';
 	}
 
 	void reset()
 	{
 		length = 0;
+		str[0] = '\0';
 	}
 
 	uint32 getLen() const
@@ -71,18 +90,38 @@ public:
 
 	void shrink_to_fit()
 	{
-		if (!this->allocated)
+		if (!this->allocated || this->length == this->limit)
 			return;
-		uint32 newLimit = this->length;
-		this->str = (uint8*)realloc(this->str, newLimit + 4);
-		this->limit = newLimit;
+		const uint32 newLimit = this->length;
+		void* newStr = realloc(this->str, static_cast<size_t>(newLimit) + 4);
+		if (newStr)
+		{
+			this->str = static_cast<uint8*>(newStr);
+			this->limit = newLimit;
+		}
 	}
 
 private:
+	void _ensureCapacity(size_t additionalLength)
+	{
+		constexpr uint64 kMaxLength = std::numeric_limits<uint32>::max();
+		if (additionalLength > kMaxLength - this->length)
+			throw std::length_error("StringBuf capacity exceeded");
+		const uint64 requiredLimit = static_cast<uint64>(this->length) + additionalLength;
+		if (requiredLimit <= this->limit)
+			return;
+		const uint64 grownLimit = std::max<uint64>(requiredLimit,
+			std::max<uint64>(64, static_cast<uint64>(this->limit) * 2));
+		_reserve(static_cast<uint32>(std::min<uint64>(grownLimit, kMaxLength)));
+	}
+
 	void _reserve(uint32 newLimit)
 	{
 		cemu_assert_debug(newLimit > length);
-		this->str = (uint8*)realloc(this->str, newLimit + 4);
+		void* newStr = realloc(this->str, static_cast<size_t>(newLimit) + 4);
+		if (!newStr)
+			throw std::bad_alloc();
+		this->str = static_cast<uint8*>(newStr);
 		this->limit = newLimit;
 	}
 

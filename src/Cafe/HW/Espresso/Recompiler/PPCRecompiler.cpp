@@ -103,7 +103,11 @@ void PPCRecompiler_visitAddressNoBlock(uint32 enterAddress)
 		s_ppcRecompilerState.recompilerSpinlock.unlock();
 		return;
 	}
-	ppcRecompilerInstanceData->GetJumpTableEntry(enterAddress) = PPCRecompiler_leaveRecompilerCode_visited;
+	if (!ppcRecompilerInstanceData->SetJumpTableEntry(enterAddress, PPCRecompiler_leaveRecompilerCode_visited))
+	{
+		s_ppcRecompilerState.recompilerSpinlock.unlock();
+		return;
+	}
 	s_ppcRecompilerState.recompilerSpinlock.unlock();
 	s_singleRecompilationMutex.lock();
 	if (ppcRecompilerInstanceData->GetJumpTableEntry(enterAddress) == PPCRecompiler_leaveRecompilerCode_visited)
@@ -127,8 +131,12 @@ void PPCRecompiler_visitAddressNoBlock(uint32 enterAddress)
 		return;
 	}
 	// add to recompilation queue and flag as visited
+	if (!ppcRecompilerInstanceData->SetJumpTableEntry(enterAddress, PPCRecompiler_leaveRecompilerCode_visited))
+	{
+		s_ppcRecompilerState.recompilerSpinlock.unlock();
+		return;
+	}
 	s_ppcRecompilerState.targetQueue.emplace(enterAddress);
-	ppcRecompilerInstanceData->GetJumpTableEntry(enterAddress) = PPCRecompiler_leaveRecompilerCode_visited;
 
 	s_ppcRecompilerState.recompilerSpinlock.unlock();
 
@@ -428,7 +436,7 @@ bool PPCRecompiler_makeRecompiledFunctionActive(uint32 initialEntryPoint, PPCFun
 		for (uint32 v = range.startAddress; v < (range.startAddress + range.length); v += 4)
 		{
 			if (ppcRecompilerInstanceData->GetJumpTableEntry(v) == PPCRecompiler_leaveRecompilerCode_visited)
-				ppcRecompilerInstanceData->GetJumpTableEntry(v) = PPCRecompiler_leaveRecompilerCode_unvisited;
+				ppcRecompilerInstanceData->SetJumpTableEntry(v, PPCRecompiler_leaveRecompilerCode_unvisited);
 		}
 		s_ppcRecompilerState.recompilerSpinlock.unlock();
 		return false;
@@ -438,7 +446,16 @@ bool PPCRecompiler_makeRecompiledFunctionActive(uint32 initialEntryPoint, PPCFun
 	cemu_assert_debug(ppcRecFunc->jumpTableEntries.empty());
 	for (auto& itr : entryPoints)
 	{
-		ppcRecompilerInstanceData->GetJumpTableEntry(itr.first) = (PPCREC_JUMP_ENTRY)((uint8*)ppcRecFunc->x86Code + itr.second);
+		if (!ppcRecompilerInstanceData->EnsureWritableJumpTableEntry(itr.first))
+		{
+			ppcRecompilerInstanceData->SetJumpTableEntry(initialEntryPoint, PPCRecompiler_leaveRecompilerCode_unvisited);
+			s_ppcRecompilerState.recompilerSpinlock.unlock();
+			return false;
+		}
+	}
+	for (auto& itr : entryPoints)
+	{
+		ppcRecompilerInstanceData->SetJumpTableEntry(itr.first, (PPCREC_JUMP_ENTRY)((uint8*)ppcRecFunc->x86Code + itr.second));
 		ppcRecFunc->jumpTableEntries.emplace_back(itr.first, ((uint8*)ppcRecFunc->x86Code + itr.second));
 	}
 
@@ -450,7 +467,7 @@ bool PPCRecompiler_makeRecompiledFunctionActive(uint32 initialEntryPoint, PPCFun
 	{
 		auto funcPtr = ppcRecompilerInstanceData->GetJumpTableEntry(v);
 		if (funcPtr == PPCRecompiler_leaveRecompilerCode_visited)
-			ppcRecompilerInstanceData->GetJumpTableEntry(v) = PPCRecompiler_leaveRecompilerCode_unvisited;
+			ppcRecompilerInstanceData->SetJumpTableEntry(v, PPCRecompiler_leaveRecompilerCode_unvisited);
 	}
 
 	// register ranges
@@ -566,6 +583,49 @@ std::bitset<PPCRecompiler_GetNumAddressSpaceBlocks()> ppcRecompiler_reservedBloc
 static_assert(PPCRecompiler_GetNumAddressSpaceBlocks() == PPC_REC_LOOKUP_BLOCK_COUNT);
 
 #if defined(__SWITCH__)
+static PPCREC_JUMP_ENTRY* s_ppcRecompilerUnvisitedLeaf{};
+
+bool PPCRecompilerInstanceData_t::EnsureWritableJumpTableEntry(uint32 ppcAddress)
+{
+	const uint32 blockIndex = ppcAddress / PPC_REC_LOOKUP_BLOCK_SIZE;
+	if (blockIndex >= PPC_REC_LOOKUP_BLOCK_COUNT || !s_ppcRecompilerUnvisitedLeaf)
+		return false;
+
+	PPCREC_JUMP_ENTRY*& leaf = ppcRecompilerDirectJumpTable[blockIndex];
+	if (leaf && leaf != s_ppcRecompilerUnvisitedLeaf)
+		return true;
+
+	void* allocation = MemMapper::AllocateMemory(nullptr, PPC_REC_LOOKUP_BLOCK_BYTES,
+		MemMapper::PAGE_PERMISSION::P_RW);
+	if (!allocation)
+		return false;
+
+	PPCREC_JUMP_ENTRY* privateLeaf = static_cast<PPCREC_JUMP_ENTRY*>(allocation);
+	std::memcpy(privateLeaf, s_ppcRecompilerUnvisitedLeaf, PPC_REC_LOOKUP_BLOCK_BYTES);
+	std::atomic_thread_fence(std::memory_order_release);
+	leaf = privateLeaf;
+	ppcRecompiler_reservedBlockMask[blockIndex] = true;
+	return true;
+}
+
+bool PPCRecompilerInstanceData_t::SetJumpTableEntry(uint32 ppcAddress, PPCREC_JUMP_ENTRY entry)
+{
+	const uint32 blockIndex = ppcAddress / PPC_REC_LOOKUP_BLOCK_SIZE;
+	const uint32 entryIndex = (ppcAddress % PPC_REC_LOOKUP_BLOCK_SIZE) / 4;
+	if (blockIndex >= PPC_REC_LOOKUP_BLOCK_COUNT || !s_ppcRecompilerUnvisitedLeaf)
+		return false;
+
+	PPCREC_JUMP_ENTRY* leaf = ppcRecompilerDirectJumpTable[blockIndex];
+	if (!leaf)
+		return false;
+	if (leaf[entryIndex] == entry)
+		return true;
+	if (!EnsureWritableJumpTableEntry(ppcAddress))
+		return false;
+	ppcRecompilerDirectJumpTable[blockIndex][entryIndex] = entry;
+	return true;
+}
+
 static void PPCRecompiler_releaseLookupTableBlock(uint32 blockIndex)
 {
 	if (blockIndex >= ppcRecompiler_reservedBlockMask.size() ||
@@ -573,9 +633,11 @@ static void PPCRecompiler_releaseLookupTableBlock(uint32 blockIndex)
 		return;
 
 	PPCREC_JUMP_ENTRY* block = ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[blockIndex];
-	if (block)
+	if (block && block != s_ppcRecompilerUnvisitedLeaf)
+	{
 		MemMapper::FreeMemory(block, PPC_REC_LOOKUP_BLOCK_BYTES);
-	ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[blockIndex] = nullptr;
+	}
+	ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[blockIndex] = s_ppcRecompilerUnvisitedLeaf;
 	ppcRecompiler_reservedBlockMask[blockIndex] = false;
 }
 
@@ -587,7 +649,37 @@ static void PPCRecompiler_releaseLookupTable()
 		return;
 	}
 	for (uint32 blockIndex = 0; blockIndex < PPCRecompiler_GetNumAddressSpaceBlocks(); ++blockIndex)
-		PPCRecompiler_releaseLookupTableBlock(blockIndex);
+	{
+		PPCREC_JUMP_ENTRY* block = ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[blockIndex];
+		if (block && block != s_ppcRecompilerUnvisitedLeaf)
+			MemMapper::FreeMemory(block, PPC_REC_LOOKUP_BLOCK_BYTES);
+		ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[blockIndex] = nullptr;
+	}
+	if (s_ppcRecompilerUnvisitedLeaf)
+		MemMapper::FreeMemory(s_ppcRecompilerUnvisitedLeaf, PPC_REC_LOOKUP_BLOCK_BYTES);
+		s_ppcRecompilerUnvisitedLeaf = nullptr;
+	ppcRecompiler_reservedBlockMask.reset();
+}
+
+static bool PPCRecompiler_initializeLookupTable()
+{
+	if (!ppcRecompilerInstanceData)
+		return false;
+	if (s_ppcRecompilerUnvisitedLeaf)
+		return true;
+
+	void* allocation = MemMapper::AllocateMemory(nullptr, PPC_REC_LOOKUP_BLOCK_BYTES,
+		MemMapper::PAGE_PERMISSION::P_RW);
+	if (!allocation)
+		return false;
+
+	s_ppcRecompilerUnvisitedLeaf = static_cast<PPCREC_JUMP_ENTRY*>(allocation);
+	for (uint32 i = 0; i < PPC_REC_LOOKUP_ENTRIES_PER_BLOCK; ++i)
+		s_ppcRecompilerUnvisitedLeaf[i] = PPCRecompiler_leaveRecompilerCode_unvisited;
+	for (PPCREC_JUMP_ENTRY*& leaf : ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable)
+		leaf = s_ppcRecompilerUnvisitedLeaf;
+	ppcRecompiler_reservedBlockMask.reset();
+	return true;
 }
 #endif
 
@@ -604,9 +696,9 @@ bool PPCRecompiler_reserveLookupTableBlock(uint32 offset, bool* newlyReserved = 
 		return true;
 
 #if defined(__SWITCH__)
-	void* p = MemMapper::AllocateMemory(nullptr, PPC_REC_LOOKUP_BLOCK_BYTES, MemMapper::PAGE_PERMISSION::P_RW);
+	void* p = s_ppcRecompilerUnvisitedLeaf;
 	if (p)
-		ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[blockIndex] = static_cast<PPCREC_JUMP_ENTRY*>(p);
+		ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[blockIndex] = s_ppcRecompilerUnvisitedLeaf;
 #else
 	void* p = MemMapper::AllocateMemory(&(ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[offset/4]), (PPC_REC_ALLOC_BLOCK_SIZE/4)*sizeof(void*), MemMapper::PAGE_PERMISSION::P_RW, true);
 #endif
@@ -617,8 +709,10 @@ bool PPCRecompiler_reserveLookupTableBlock(uint32 offset, bool* newlyReserved = 
 #endif
 		return false;
 	}
+#if !defined(__SWITCH__)
 	for(uint32 i=0; i<PPC_REC_ALLOC_BLOCK_SIZE/4; i++)
-		ppcRecompilerInstanceData->GetJumpTableEntry(offset + i * 4) = PPCRecompiler_leaveRecompilerCode_unvisited;
+		ppcRecompilerInstanceData->SetJumpTableEntry(offset + i * 4, PPCRecompiler_leaveRecompilerCode_unvisited);
+#endif
 	ppcRecompiler_reservedBlockMask[blockIndex] = true;
 	if (newlyReserved)
 		*newlyReserved = true;
@@ -710,7 +804,7 @@ void PPCRecompiler_deleteFunction(PPCRecFunction_t* func)
 	for (auto& entrypoint : func->jumpTableEntries)
 	{
 		if (ppcRecompilerInstanceData->GetJumpTableEntry(entrypoint.ppcAddr) == entrypoint.hostEntrypoint)
-			ppcRecompilerInstanceData->GetJumpTableEntry(entrypoint.ppcAddr) = PPCRecompiler_leaveRecompilerCode_unvisited;
+			ppcRecompilerInstanceData->SetJumpTableEntry(entrypoint.ppcAddr, PPCRecompiler_leaveRecompilerCode_unvisited);
 	}
 	// delete from storage
 	for (auto& r : func->list_ranges)
@@ -838,7 +932,8 @@ void PPCRecompiler_init()
 	PPCRecompilerAArch64Gen_generateRecompilerInterfaceFunctions();
 #endif
 #if defined(__SWITCH__)
-	if (!PPCRecompiler_allocateRangeInternal(0, 0x1000) ||
+	if (!PPCRecompiler_initializeLookupTable() ||
+		!PPCRecompiler_allocateRangeInternal(0, 0x1000) ||
 		!PPCRecompiler_allocateRangeInternal(mmuRange_TRAMPOLINE_AREA.getBase(), mmuRange_TRAMPOLINE_AREA.getSize()) ||
 		!PPCRecompiler_allocateRangeInternal(mmuRange_CODECAVE.getBase(), mmuRange_CODECAVE.getSize()))
 	{

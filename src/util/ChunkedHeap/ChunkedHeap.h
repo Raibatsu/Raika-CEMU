@@ -33,7 +33,9 @@ class ChunkedHeap
 
 	struct Chunk
 	{
-		uint32 size;
+		uint32 size{};
+		uint32 allocatedBytes{};
+		bool dedicated{};
 	};
 
 public:
@@ -46,12 +48,87 @@ public:
 		return _alloc(size, alignment);
 	}
 
+	CHAddr allocDedicated(uint32 size)
+	{
+		return _allocDedicated(size);
+	}
+
 	void free(CHAddr addr)
 	{
 		_free(addr);
 	}
 
 	virtual uint32 allocateNewChunk(uint32 chunkIndex, uint32 minimumAllocationSize) = 0;
+	virtual uint32 allocateDedicatedChunk(uint32 chunkIndex, uint32 minimumAllocationSize)
+	{
+		return allocateNewChunk(chunkIndex, minimumAllocationSize);
+	}
+	virtual bool releaseChunk(uint32 chunkIndex) { return false; }
+
+	uint32 getAllocationSize(CHAddr addr) const
+	{
+		if (!addr.internal)
+			return 0;
+		return static_cast<const AllocRange*>(addr.internal)->size;
+	}
+
+	bool getChunkStatistics(uint32 chunkIndex, uint32& size, uint32& allocatedBytes) const
+	{
+		if (chunkIndex >= m_chunks.size() || m_chunks[chunkIndex].size == 0)
+			return false;
+		size = m_chunks[chunkIndex].size;
+		allocatedBytes = m_chunks[chunkIndex].allocatedBytes;
+		return true;
+	}
+
+	uint32 getEmptyChunkBytes() const
+	{
+		uint32 emptyBytes = 0;
+		for (const Chunk& chunk : m_chunks)
+		{
+			if (chunk.size != 0 && chunk.allocatedBytes == 0)
+				emptyBytes += chunk.size;
+		}
+		return emptyBytes;
+	}
+
+	uint32 releaseEmptyChunks()
+	{
+		uint32 releasedBytes = 0;
+		for (uint32 chunkIndex = 0; chunkIndex < m_chunks.size(); ++chunkIndex)
+		{
+			Chunk& chunk = m_chunks[chunkIndex];
+			if (chunk.size == 0 || chunk.allocatedBytes != 0)
+				continue;
+
+			const uint32 bucketIndex = ulog2(chunk.size);
+			AllocRange* wholeChunkRange = m_bucketFreeRange[bucketIndex];
+			while (wholeChunkRange)
+			{
+				if (wholeChunkRange->chunkIndex == chunkIndex && wholeChunkRange->offset == 0 &&
+					wholeChunkRange->size == chunk.size && wholeChunkRange->isFree &&
+					!wholeChunkRange->prevOrdered && !wholeChunkRange->nextOrdered)
+					break;
+				wholeChunkRange = wholeChunkRange->nextFree;
+			}
+			if (!wholeChunkRange || !releaseChunk(chunkIndex))
+				continue;
+
+			forgetFreeRange(wholeChunkRange, bucketIndex);
+			m_allocEntriesPool.freeObj(wholeChunkRange);
+			releasedBytes += chunk.size;
+			m_numHeapBytes -= chunk.size;
+			chunk = {};
+		}
+		if (releasedBytes != 0)
+			m_allocationLimitReached = false;
+		return releasedBytes;
+	}
+
+	void allowNewChunkAllocation()
+	{
+		m_allocationLimitReached = false;
+	}
 
 private:
 	unsigned ulog2(uint32 v)
@@ -94,18 +171,29 @@ private:
 		}
 	}
 
-	bool allocateChunk(uint32 minimumAllocationSize)
+	bool allocateChunk(uint32 minimumAllocationSize, bool dedicated = false,
+		AllocRange** wholeChunkRange = nullptr)
 	{
-		uint32 chunkIndex = (uint32)m_chunks.size();
-		m_chunks.emplace_back();
-		uint32 chunkSize = allocateNewChunk(chunkIndex, minimumAllocationSize);
+		uint32 chunkIndex = 0;
+		while (chunkIndex < m_chunks.size() && m_chunks[chunkIndex].size != 0)
+			++chunkIndex;
+		if (chunkIndex == m_chunks.size())
+			m_chunks.emplace_back();
+		uint32 chunkSize = dedicated
+			? allocateDedicatedChunk(chunkIndex, minimumAllocationSize)
+			: allocateNewChunk(chunkIndex, minimumAllocationSize);
 		cemu_assert_debug((chunkSize%TMinimumAlignment) == 0); // chunk size should be a multiple of the minimum alignment
 		if (chunkSize == 0)
 			return false;
 		cemu_assert_debug(chunkSize < 0x80000000u); // chunk size must be below 2GB
+		m_chunks[chunkIndex].size = chunkSize;
+		m_chunks[chunkIndex].allocatedBytes = 0;
+		m_chunks[chunkIndex].dedicated = dedicated;
 		AllocRange* range = m_allocEntriesPool.allocObj(0, chunkIndex, chunkSize, true);
 		trackFreeRange(range);
 		m_numHeapBytes += chunkSize;
+		if (wholeChunkRange)
+			*wholeChunkRange = range;
 		return true;
 	}
 
@@ -144,6 +232,7 @@ private:
 		range->offset = allocOffset;
 		range->size = allocSize;
 		range->isFree = false;
+		m_chunks[range->chunkIndex].allocatedBytes += allocSize;
 	}
 
 	CHAddr _alloc(uint32 size, uint32 alignment)
@@ -169,7 +258,7 @@ private:
 			AllocRange* range = m_bucketFreeRange[bucketIndex];
 			while (range)
 			{
-				if (range->size >= size)
+				if (!m_chunks[range->chunkIndex].dedicated && range->size >= size)
 				{
 					// verify if aligned allocation fits
 					uint32 alignedOffset = (range->offset + alignmentM1) & ~alignmentM1;
@@ -198,6 +287,53 @@ private:
 		return _alloc(size, alignment);
 	}
 
+	CHAddr _allocDedicated(uint32 size)
+	{
+		cemu_assert_debug(size <= (0x7FFFFFFFu-TMinimumAlignment));
+		if (size == 0) [[unlikely]]
+			size = TMinimumAlignment;
+		else
+			size = (size + (TMinimumAlignment - 1)) & ~(TMinimumAlignment - 1);
+
+		AllocRange* bestRange = nullptr;
+		uint32 bestBucket = 0;
+		for (uint32 bucketIndex = ulog2(size); bucketIndex < 31; ++bucketIndex)
+		{
+			for (AllocRange* range = m_bucketFreeRange[bucketIndex]; range;
+				range = range->nextFree)
+			{
+				const Chunk& chunk = m_chunks[range->chunkIndex];
+				if (!chunk.dedicated || chunk.allocatedBytes != 0 ||
+					range->offset != 0 || range->size != chunk.size ||
+					range->prevOrdered || range->nextOrdered || range->size != size)
+					continue;
+				if (!bestRange || range->size < bestRange->size)
+				{
+					bestRange = range;
+					bestBucket = bucketIndex;
+				}
+			}
+		}
+
+		if (!bestRange)
+		{
+			if (m_allocationLimitReached)
+				return CHAddr::getInvalid();
+			if (!allocateChunk(size, true, &bestRange))
+			{
+				m_allocationLimitReached = true;
+				return CHAddr::getInvalid();
+			}
+			bestBucket = ulog2(bestRange->size);
+		}
+
+		const uint32 allocationSize = bestRange->size;
+		const uint32 chunkIndex = bestRange->chunkIndex;
+		_allocFrom(bestRange, bestBucket, 0, allocationSize);
+		m_numAllocatedBytes += allocationSize;
+		return CHAddr(0, chunkIndex, bestRange);
+	}
+
 	void _free(CHAddr addr)
 	{
 		if(!addr.internal)
@@ -207,6 +343,8 @@ private:
 		}
 		AllocRange* range = (AllocRange*)addr.internal;
 		m_numAllocatedBytes -= range->size;
+		cemu_assert_debug(m_chunks[range->chunkIndex].allocatedBytes >= range->size);
+		m_chunks[range->chunkIndex].allocatedBytes -= range->size;
 		// try merge left or right
 		AllocRange* prevRange = range->prevOrdered;
 		AllocRange* nextRange = range->nextOrdered;

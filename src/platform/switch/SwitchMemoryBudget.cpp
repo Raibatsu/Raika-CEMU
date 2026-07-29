@@ -78,9 +78,14 @@ size_t SwitchMemoryBudget_ComputeGuestPoolSize(size_t heapTotal)
 	return desiredPool;
 }
 
+size_t SwitchMemoryBudget_GetMandatoryGuestBackingSize()
+{
+	return kMandatoryGuestBacking;
+}
+
 size_t SwitchMemoryBudget_GetJitArenaSize()
 {
-	return ScaledBudget(12, 64 * MiB, 256 * MiB);
+	return 64 * MiB;
 }
 
 size_t SwitchMemoryBudget_GetBufferCacheSize()
@@ -107,23 +112,35 @@ bool SwitchMemoryBudget_ShouldRecycleStaging(size_t currentSize, size_t growthSi
 	return growthSize > headroom || headroom - growthSize < reserve;
 }
 
+bool SwitchMemoryBudget_ShouldPrepareTextureAllocation(size_t allocationSize)
+{
+	if (allocationSize == 0)
+		return false;
+	const size_t headroom = QueryContiguousHeadroom();
+	const size_t reserve = GetSafetyReserve();
+	return allocationSize > headroom || headroom - allocationSize < reserve;
+}
+
 size_t SwitchMemoryBudget_SelectTextureChunkSize(size_t minimumSize, size_t preferredSize)
 {
 	constexpr size_t kTextureAlignment = 32 * 1024;
+	constexpr size_t kMinimumPooledChunk = 8 * MiB;
 	minimumSize = AlignUp(minimumSize, kTextureAlignment);
 	preferredSize = AlignUp(std::max(preferredSize, minimumSize), kTextureAlignment);
+	const size_t allocationFloor = std::min(preferredSize,
+		std::max(minimumSize, kMinimumPooledChunk));
 
 	const size_t headroom = QueryContiguousHeadroom();
 	const size_t reserve = GetSafetyReserve();
 	size_t selectedSize = preferredSize;
-	while (selectedSize > minimumSize)
+	while (selectedSize > allocationFloor)
 	{
 		if (selectedSize <= headroom && headroom - selectedSize >= reserve)
 			break;
 		const size_t smallerSize = (selectedSize / 2) & ~(kTextureAlignment - 1);
-		if (smallerSize < minimumSize)
+		if (smallerSize < allocationFloor)
 		{
-			selectedSize = minimumSize;
+			selectedSize = allocationFloor;
 			break;
 		}
 		selectedSize = smallerSize;

@@ -1,4 +1,5 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VKRMemoryManager.h"
+#include "Cafe/HW/Latte/Renderer/Vulkan/LatteTextureVk.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 #include <imgui.h>
 #if defined(__SWITCH__)
@@ -37,6 +38,82 @@ void FlushMappedRanges(VkDevice device, std::vector<VkMappedMemoryRange>& ranges
 	ranges.resize(mergedCount);
 	vkFlushMappedMemoryRanges(device, static_cast<uint32>(ranges.size()), ranges.data());
 	ranges.clear();
+}
+
+struct TextureEvictionGroup
+{
+	uint32 chunkSize{};
+	uint32 allocatedBytes{};
+	uint64 deleteableBytes{};
+	std::vector<LatteTexture*> textures;
+
+	bool CanEmptyChunk() const
+	{
+		return deleteableBytes + textures.size() * 31 >= allocatedBytes;
+	}
+};
+
+std::vector<TextureEvictionGroup> BuildTextureEvictionGroups(
+	VKRMemoryManager* memoryManager, const std::vector<LatteTexture*>& textures)
+{
+	std::vector<TextureEvictionGroup> groups;
+	std::unordered_map<uint64, size_t> groupIndices;
+	for (LatteTexture* texture : textures)
+	{
+		auto* textureVk = static_cast<LatteTextureVk*>(texture);
+		VKRObjectTexture* image = textureVk->GetImageObj();
+		VkImageMemAllocation* allocation = image ? image->m_allocation : nullptr;
+		if (!allocation || !allocation->mem.isValid())
+			continue;
+
+		auto heapIt = memoryManager->map_textureHeap.find(allocation->typeFilter);
+		if (heapIt == memoryManager->map_textureHeap.end())
+			continue;
+		uint32 chunkSize = 0;
+		uint32 allocatedBytes = 0;
+		if (!heapIt->second->getChunkStatistics(allocation->mem.chunkIndex,
+			chunkSize, allocatedBytes))
+			continue;
+
+		const uint64 key = (static_cast<uint64>(allocation->typeFilter) << 32) |
+			allocation->mem.chunkIndex;
+		auto [groupIt, inserted] = groupIndices.try_emplace(key, groups.size());
+		if (inserted)
+		{
+			TextureEvictionGroup& group = groups.emplace_back();
+			group.chunkSize = chunkSize;
+			group.allocatedBytes = allocatedBytes;
+		}
+		TextureEvictionGroup& group = groups[groupIt->second];
+		group.deleteableBytes += allocation->allocationSize;
+		group.textures.emplace_back(texture);
+	}
+
+	std::sort(groups.begin(), groups.end(), [](const auto& lhs, const auto& rhs) {
+		if (lhs.CanEmptyChunk() != rhs.CanEmptyChunk())
+			return lhs.CanEmptyChunk();
+		if (lhs.CanEmptyChunk() && lhs.chunkSize != rhs.chunkSize)
+			return lhs.chunkSize > rhs.chunkSize;
+		const uint64 lhsPinned = lhs.allocatedBytes > lhs.deleteableBytes
+			? lhs.allocatedBytes - lhs.deleteableBytes : 0;
+		const uint64 rhsPinned = rhs.allocatedBytes > rhs.deleteableBytes
+			? rhs.allocatedBytes - rhs.deleteableBytes : 0;
+		if (lhsPinned != rhsPinned)
+			return lhsPinned < rhsPinned;
+		return lhs.deleteableBytes > rhs.deleteableBytes;
+	});
+	return groups;
+}
+
+size_t ReleaseEmptyTextureChunks(VKRMemoryManager* memoryManager)
+{
+	size_t releasedBytes = 0;
+	for (auto& [typeFilter, heap] : memoryManager->map_textureHeap)
+	{
+		(void)typeFilter;
+		releasedBytes += heap->releaseEmptyChunks();
+	}
+	return releasedBytes;
 }
 }
 #endif
@@ -276,6 +353,21 @@ void VKRSynchronizedRingAllocator::releaseAllReservations()
 	}
 }
 
+size_t VKRSynchronizedRingAllocator::TrimAfterGpuIdle()
+{
+	releaseAllReservations();
+	size_t releasedSize = 0;
+	while (m_buffers.size() > 1)
+	{
+		auto& buffer = m_buffers.back();
+		releasedSize += buffer.size;
+		vkUnmapMemory(m_vkr->GetLogicalDevice(), buffer.vk_mem);
+		m_vkrMemMgr->DeleteBuffer(buffer.vk_buffer, buffer.vk_mem);
+		m_buffers.pop_back();
+	}
+	return releasedSize;
+}
+
 VkBuffer VKRSynchronizedRingAllocator::GetBufferByIndex(uint32 index) const
 {
 	return m_buffers[index].vk_buffer;
@@ -289,12 +381,11 @@ void VKRSynchronizedRingAllocator::GetStats(uint32& numBuffers, size_t& totalBuf
 	for (auto& itr : m_buffers)
 	{
 		totalBufferSize += itr.size;
-		// calculate free space in buffer
 		uint32 distanceToSyncPoint;
 		if (!itr.queue_syncPoints.empty())
 		{
 			if (itr.queue_syncPoints.front().offset < itr.writeIndex)
-				distanceToSyncPoint = (itr.size - itr.writeIndex) + itr.queue_syncPoints.front().offset; // size with wrap-around
+				distanceToSyncPoint = (itr.size - itr.writeIndex) + itr.queue_syncPoints.front().offset;
 			else
 				distanceToSyncPoint = itr.queue_syncPoints.front().offset - itr.writeIndex;
 		}
@@ -302,6 +393,15 @@ void VKRSynchronizedRingAllocator::GetStats(uint32& numBuffers, size_t& totalBuf
 			distanceToSyncPoint = itr.size;
 		freeBufferSize += distanceToSyncPoint;
 	}
+}
+
+size_t VKRMemoryManager::ReleaseTextureUploadBufferCapacity()
+{
+	if (!m_textureUploadBuffer.empty())
+		return 0;
+	const size_t releasedSize = m_textureUploadBuffer.capacity();
+	std::vector<uint8>().swap(m_textureUploadBuffer);
+	return releasedSize;
 }
 
 /* VKRSynchronizedHeapAllocator */
@@ -385,26 +485,58 @@ VkTextureChunkedHeap::~VkTextureChunkedHeap()
 {
 	VkDevice device = VulkanRenderer::GetInstance()->GetLogicalDevice();
 	for (auto& i : m_list_chunkInfo)
-		vkFreeMemory(device, i.mem, nullptr);
+	{
+		if (i.mem != VK_NULL_HANDLE)
+			vkFreeMemory(device, i.mem, nullptr);
+	}
+}
+
+size_t VKRSynchronizedRingAllocator::GetTrimmableBytes() const
+{
+	size_t trimmableBytes = 0;
+	for (size_t i = 1; i < m_buffers.size(); ++i)
+		trimmableBytes += m_buffers[i].size;
+	return trimmableBytes;
 }
 
 uint32 VkTextureChunkedHeap::allocateNewChunk(uint32 chunkIndex, uint32 minimumAllocationSize)
 {
-	cemu_assert_debug(m_list_chunkInfo.size() == chunkIndex);
-	m_list_chunkInfo.resize(m_list_chunkInfo.size() + 1);
+	return allocateChunkMemory(chunkIndex, minimumAllocationSize, false);
+}
+
+uint32 VkTextureChunkedHeap::allocateDedicatedChunk(uint32 chunkIndex,
+	uint32 minimumAllocationSize)
+{
+	return allocateChunkMemory(chunkIndex, minimumAllocationSize, true);
+}
+
+uint32 VkTextureChunkedHeap::allocateChunkMemory(uint32 chunkIndex,
+	uint32 minimumAllocationSize, bool dedicated)
+{
+	if (m_list_chunkInfo.size() <= chunkIndex)
+		m_list_chunkInfo.resize(chunkIndex + 1);
+	cemu_assert_debug(m_list_chunkInfo[chunkIndex].mem == VK_NULL_HANDLE);
 
 	// pad minimumAllocationSize to 32KB alignment
 	minimumAllocationSize = (minimumAllocationSize + (32 * 1024 - 1)) & ~(32 * 1024 - 1);
-	uint32 allocationSize = 1024 * 1024 * 128;
-	if (chunkIndex == 0)
+	uint32 allocationSize = minimumAllocationSize;
+	if (!dedicated)
 	{
-		// make the first allocation smaller, this decreases wasted memory when there are textures that require specific flags (and thus separate heaps)
-		allocationSize = 1024 * 1024 * 16;
-	}
-	if (allocationSize < minimumAllocationSize)
-		allocationSize = minimumAllocationSize;
 #if defined(__SWITCH__)
-	allocationSize = (uint32)SwitchMemoryBudget_SelectTextureChunkSize(minimumAllocationSize, allocationSize);
+		allocationSize = 64 * 1024 * 1024;
+#else
+		allocationSize = chunkIndex == 0
+			? 16 * 1024 * 1024 : 128 * 1024 * 1024;
+#endif
+		if (allocationSize < minimumAllocationSize)
+			allocationSize = minimumAllocationSize;
+#if defined(__SWITCH__)
+		allocationSize = (uint32)SwitchMemoryBudget_SelectTextureChunkSize(
+			minimumAllocationSize, allocationSize);
+#endif
+	}
+#if defined(__SWITCH__)
+	m_vkrMemoryManager->PrepareTextureAllocation(allocationSize);
 #endif
 	// get available memory types/heaps
 	std::vector<uint32> deviceLocalMemoryTypeIndices = m_vkrMemoryManager->FindMemoryTypes(m_typeFilter, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -415,7 +547,12 @@ uint32 VkTextureChunkedHeap::allocateNewChunk(uint32 chunkIndex, uint32 minimumA
 	};
 	hostLocalMemoryTypeIndices.erase(std::remove_if(hostLocalMemoryTypeIndices.begin(), hostLocalMemoryTypeIndices.end(), pred), hostLocalMemoryTypeIndices.end());
 	// allocate chunk memory
-	for (sint32 t = 0; t < 3; t++)
+#if defined(__SWITCH__)
+	constexpr sint32 kMaxAllocationAttempts = 4;
+#else
+	constexpr sint32 kMaxAllocationAttempts = 3;
+#endif
+	for (sint32 t = 0; t < kMaxAllocationAttempts; t++)
 	{
 		// attempt to allocate from device local memory first
 		for (auto memType : deviceLocalMemoryTypeIndices)
@@ -448,9 +585,18 @@ uint32 VkTextureChunkedHeap::allocateNewChunk(uint32 chunkIndex, uint32 minimumA
 			return allocationSize;
 		}
 		// retry with smaller size if possible
-		allocationSize /= 2;
+		if (allocationSize == minimumAllocationSize)
+			break;
+		const uint32 smallerAllocationSize = allocationSize / 2;
+#if defined(__SWITCH__)
+		allocationSize = smallerAllocationSize < minimumAllocationSize ||
+			t == kMaxAllocationAttempts - 2
+			? minimumAllocationSize : smallerAllocationSize;
+#else
+		allocationSize = smallerAllocationSize;
 		if (allocationSize < minimumAllocationSize)
 			break;
+#endif
 	}
 	cemuLog_log(LogType::Force, "Unable to allocate image memory chunk ({} heaps)", deviceLocalMemoryTypeIndices.size());
 #if defined(__SWITCH__)
@@ -458,6 +604,17 @@ uint32 VkTextureChunkedHeap::allocateNewChunk(uint32 chunkIndex, uint32 minimumA
 #else
 	throw std::runtime_error("failed to allocate image memory!");
 #endif
+}
+
+bool VkTextureChunkedHeap::releaseChunk(uint32 chunkIndex)
+{
+	if (chunkIndex >= m_list_chunkInfo.size() ||
+		m_list_chunkInfo[chunkIndex].mem == VK_NULL_HANDLE)
+		return false;
+	vkFreeMemory(VulkanRenderer::GetInstance()->GetLogicalDevice(),
+		m_list_chunkInfo[chunkIndex].mem, nullptr);
+	m_list_chunkInfo[chunkIndex].mem = VK_NULL_HANDLE;
+	return true;
 }
 
 /* VkBufferChunkedHeap */
@@ -667,7 +824,8 @@ bool VKRMemoryManager::CreateBufferFromHostMemory(void* hostPointer, VkDeviceSiz
 
 	bufferInfo.pNext = &emb;
 
-	if (vkCreateBuffer(m_vkr->GetLogicalDevice(), &bufferInfo, nullptr, &buffer) != VK_SUCCESS)
+	const VkResult createResult = vkCreateBuffer(m_vkr->GetLogicalDevice(), &bufferInfo, nullptr, &buffer);
+	if (createResult != VK_SUCCESS)
 	{
 		cemuLog_log(LogType::Force, "Failed to create buffer (CreateBuffer)");
 		return false;
@@ -701,7 +859,8 @@ bool VKRMemoryManager::CreateBufferFromHostMemory(void* hostPointer, VkDeviceSiz
 		vkDestroyBuffer(m_vkr->GetLogicalDevice(), buffer, nullptr);
 		return false;
 	}
-	if (vkBindBufferMemory(m_vkr->GetLogicalDevice(), buffer, bufferMemory, 0) != VK_SUCCESS)
+	const VkResult bindResult = vkBindBufferMemory(m_vkr->GetLogicalDevice(), buffer, bufferMemory, 0);
+	if (bindResult != VK_SUCCESS)
 	{
 		vkFreeMemory(m_vkr->GetLogicalDevice(), bufferMemory, nullptr);
 		vkDestroyBuffer(m_vkr->GetLogicalDevice(), buffer, nullptr);
@@ -740,33 +899,139 @@ VkImageMemAllocation* VKRMemoryManager::imageMemoryAllocate(VkImage image)
 
 	// alloc mem from heap
 	uint32 allocationSize = (uint32)memRequirements.size;
+#if defined(__SWITCH__)
+	constexpr uint32 kDedicatedTextureThreshold = 16u * 1024 * 1024;
+	const bool useDedicatedAllocation = allocationSize >= kDedicatedTextureThreshold;
+#endif
+	auto allocateTextureMemory = [&]() -> CHAddr {
+#if defined(__SWITCH__)
+		if (useDedicatedAllocation)
+		{
+			CHAddr dedicatedMem = texHeap->allocDedicatedMem(allocationSize);
+			if (dedicatedMem.isValid())
+				return dedicatedMem;
+			CHAddr pooledMem = texHeap->allocMem(allocationSize,
+				(uint32)memRequirements.alignment);
+			if (pooledMem.isValid())
+				texHeap->allowNewChunkAllocation();
+			return pooledMem;
+		}
+#endif
+		return texHeap->allocMem(allocationSize,
+			(uint32)memRequirements.alignment);
+	};
 
-	CHAddr mem = texHeap->allocMem(allocationSize, (uint32)memRequirements.alignment);
+	CHAddr mem = allocateTextureMemory();
 	if (!mem.isValid())
 	{
-		// allocation failed, try to make space by deleting textures
-		// todo - improve this algorithm
-		std::vector<LatteTexture*> deleteableTextures = LatteTC_GetDeleteableTextures();
-		// delete up to 20 textures from the deletable textures list, then retry allocation
-		while (!deleteableTextures.empty())
+#if defined(__SWITCH__)
+		m_vkr->WaitCommandBufferFinished(m_vkr->GetCurrentCommandBufferId());
+		m_vkr->ProcessDestructionQueue();
+		const size_t stagingReleasedBytes = m_stagingBuffer.TrimAfterGpuIdle();
+		const size_t uploadReleasedBytes = ReleaseTextureUploadBufferCapacity();
+		if (stagingReleasedBytes != 0 || uploadReleasedBytes != 0)
 		{
-			size_t numDelete = deleteableTextures.size();
-			if (numDelete > 20)
-				numDelete = 20;
-			for (size_t i = 0; i < numDelete; i++)
-				LatteTexture_Delete(deleteableTextures[i]);
-			deleteableTextures.erase(deleteableTextures.begin(), deleteableTextures.begin() + numDelete);
-			mem = texHeap->allocMem(allocationSize, (uint32)memRequirements.alignment);
+			texHeap->allowNewChunkAllocation();
+			mem = allocateTextureMemory();
+		}
+
+		size_t pooledReleasedBytes = 0;
+		if (!mem.isValid())
+			pooledReleasedBytes = ReleaseEmptyTextureChunks(this);
+		if (pooledReleasedBytes != 0)
+		{
+			texHeap->allowNewChunkAllocation();
+			mem = allocateTextureMemory();
+		}
+
+		std::vector<TextureEvictionGroup> evictionGroups;
+		if (!mem.isValid())
+		{
+			std::vector<LatteTexture*> deleteableTextures = LatteTC_GetDeleteableTextures();
+			evictionGroups = BuildTextureEvictionGroups(this, deleteableTextures);
+		}
+		std::unordered_set<LatteTexture*> deletedTextures;
+
+		auto releaseDeletedChunks = [&]() -> size_t {
+			m_vkr->WaitCommandBufferFinished(m_vkr->GetCurrentCommandBufferId());
+			m_vkr->ProcessDestructionQueue();
+			const size_t releasedBytes = ReleaseEmptyTextureChunks(this);
+			if (releasedBytes != 0)
+				texHeap->allowNewChunkAllocation();
+			return releasedBytes;
+		};
+
+		for (const TextureEvictionGroup& group : evictionGroups)
+		{
+			if (!group.CanEmptyChunk())
+				break;
+			for (LatteTexture* texture : group.textures)
+			{
+				deletedTextures.emplace(texture);
+				LatteTexture_Delete(texture);
+			}
+			releaseDeletedChunks();
+			mem = allocateTextureMemory();
 			if (mem.isValid())
 				break;
 		}
+
+		bool pendingDeletions = false;
 		if (!mem.isValid())
+		{
+			size_t batchSize = 0;
+			for (const TextureEvictionGroup& group : evictionGroups)
+			{
+				for (LatteTexture* texture : group.textures)
+				{
+					if (deletedTextures.contains(texture))
+						continue;
+					deletedTextures.emplace(texture);
+					LatteTexture_Delete(texture);
+					pendingDeletions = true;
+					if (++batchSize < 20)
+						continue;
+					batchSize = 0;
+					m_vkr->ProcessDestructionQueue();
+					mem = allocateTextureMemory();
+					if (mem.isValid())
+						break;
+				}
+				if (mem.isValid())
+					break;
+			}
+		}
+
+		if (!mem.isValid() && pendingDeletions)
+		{
+			releaseDeletedChunks();
+			mem = allocateTextureMemory();
+		}
+#else
+		std::vector<LatteTexture*> deleteableTextures = LatteTC_GetDeleteableTextures();
+		while (!deleteableTextures.empty())
+		{
+			const size_t numDelete = std::min<size_t>(deleteableTextures.size(), 20);
+			for (size_t i = 0; i < numDelete; i++)
+				LatteTexture_Delete(deleteableTextures[i]);
+			deleteableTextures.erase(deleteableTextures.begin(), deleteableTextures.begin() + numDelete);
+			mem = allocateTextureMemory();
+			if (mem.isValid())
+				break;
+		}
+#endif
+		if (!mem.isValid())
+		{
 			m_vkr->UnrecoverableError("Ran out of VRAM for textures");
+		}
 	}
 
-	vkBindImageMemory(m_vkr->GetLogicalDevice(), image, texHeap->getChunkMem(mem.chunkIndex), mem.offset);
+	const VkResult bindResult = vkBindImageMemory(m_vkr->GetLogicalDevice(), image,
+		texHeap->getChunkMem(mem.chunkIndex), mem.offset);
+	(void)bindResult;
 
-	return new VkImageMemAllocation(typeFilter, mem, allocationSize);
+	return new VkImageMemAllocation(typeFilter, mem,
+		texHeap->getAllocationSize(mem));
 }
 
 void VKRMemoryManager::imageMemoryFree(VkImageMemAllocation* imageMemAllocation)
@@ -780,6 +1045,32 @@ void VKRMemoryManager::imageMemoryFree(VkImageMemAllocation* imageMemAllocation)
 	heapItr->second->freeMem(imageMemAllocation->mem);
 	delete imageMemAllocation;
 }
+
+#if defined(__SWITCH__)
+void VKRMemoryManager::PrepareTextureAllocation(size_t allocationSize)
+{
+	if (!SwitchMemoryBudget_ShouldPrepareTextureAllocation(allocationSize))
+		return;
+
+	size_t emptyTextureBytes = 0;
+	for (const auto& [typeFilter, heap] : map_textureHeap)
+	{
+		(void)typeFilter;
+		emptyTextureBytes += heap->getEmptyChunkBytes();
+	}
+	const size_t trimmableStagingBytes = m_stagingBuffer.GetTrimmableBytes();
+	const size_t uploadScratchBytes = m_textureUploadBuffer.empty()
+		? m_textureUploadBuffer.capacity() : 0;
+	if (emptyTextureBytes == 0 && trimmableStagingBytes == 0 && uploadScratchBytes == 0)
+		return;
+
+	m_vkr->WaitCommandBufferFinished(m_vkr->GetCurrentCommandBufferId());
+	m_vkr->ProcessDestructionQueue();
+	m_stagingBuffer.TrimAfterGpuIdle();
+	ReleaseTextureUploadBufferCapacity();
+	ReleaseEmptyTextureChunks(this);
+}
+#endif
 
 void VKRMemoryManager::appendOverlayHeapDebugInfo()
 {

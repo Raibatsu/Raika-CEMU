@@ -1,8 +1,10 @@
 #include "H264DecInternal.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <thread>
 #include <vector>
@@ -56,17 +58,55 @@ namespace H264
 			{
 				m_decoderThread.join();
 			}
+			av_packet_free(&m_packet);
+			av_frame_free(&m_decodedFrame);
+			av_frame_free(&m_transferFrame);
 			avcodec_free_context(&m_codecContext);
 			av_buffer_unref(&m_deviceContext);
 		}
 
 	  private:
+		struct OutputBufferState
+		{
+			void* address{};
+			int width{};
+			int height{};
+			int stride{};
+		};
+
 		void ResetOutputState()
 		{
 			m_parserState = {};
 			m_outputWidth = 0;
 			m_outputHeight = 0;
+			std::scoped_lock lock(m_outputBufferMutex);
 			m_initializedOutputBuffers.clear();
+		}
+
+		bool InitializeOutputBuffer(void* imageOutput, int width, int height)
+		{
+			if (!imageOutput || width <= 0 || height <= 0 || width > 4096 || height > 4096 ||
+				(width & 1) || (height & 1))
+				return false;
+
+			const int stride = (width + 0xFF) & ~0xFF;
+			std::scoped_lock lock(m_outputBufferMutex);
+			auto entry = std::ranges::find_if(m_initializedOutputBuffers,
+				[imageOutput](const OutputBufferState& state) { return state.address == imageOutput; });
+			if (entry != m_initializedOutputBuffers.end() && entry->width == width &&
+				entry->height == height && entry->stride == stride)
+				return true;
+
+			const size_t lumaSize = static_cast<size_t>(stride) * height;
+			auto* output = static_cast<uint8*>(imageOutput);
+			std::memset(output, 0x10, lumaSize);
+			std::memset(output + lumaSize, 0x80, lumaSize / 2);
+			const OutputBufferState state{imageOutput, width, height, stride};
+			if (entry == m_initializedOutputBuffers.end())
+				m_initializedOutputBuffers.push_back(state);
+			else
+				*entry = state;
+			return true;
 		}
 
 		void PrepareOutputBuffer(uint8* data, uint32 length, void* imageOutput) override
@@ -86,18 +126,7 @@ namespace H264
 					m_outputHeight = 1080;
 			}
 
-			if (m_outputWidth <= 0 || m_outputHeight <= 0 || m_outputWidth > 4096 || m_outputHeight > 4096 ||
-				(m_outputWidth & 1) || (m_outputHeight & 1))
-				return;
-			for (void* initializedBuffer : m_initializedOutputBuffers)
-				if (initializedBuffer == imageOutput)
-					return;
-			const size_t stride = static_cast<size_t>((m_outputWidth + 0xFF) & ~0xFF);
-			const size_t lumaSize = stride * static_cast<size_t>(m_outputHeight);
-			auto* output = static_cast<uint8*>(imageOutput);
-			std::memset(output, 0x10, lumaSize);
-			std::memset(output + lumaSize, 0x80, lumaSize / 2);
-			m_initializedOutputBuffers.push_back(imageOutput);
+			InitializeOutputBuffer(imageOutput, m_outputWidth, m_outputHeight);
 		}
 
 		static AVPixelFormat SelectFormat(AVCodecContext*, const AVPixelFormat* formats)
@@ -128,7 +157,12 @@ namespace H264
 			m_codecContext->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
 			m_codecContext->thread_count = 1;
 			m_codecContext->extra_hw_frames = 2;
-			return avcodec_open2(m_codecContext, codec, nullptr) >= 0;
+			if (avcodec_open2(m_codecContext, codec, nullptr) < 0)
+				return false;
+			m_packet = av_packet_alloc();
+			m_decodedFrame = av_frame_alloc();
+			m_transferFrame = av_frame_alloc();
+			return m_packet && m_decodedFrame && m_transferFrame;
 		}
 
 		void QueueResult(uint32 index, bool hasFrame, const AVFrame* frame = nullptr)
@@ -170,56 +204,44 @@ namespace H264
 
 		bool CopyFrame(AVFrame* frame, uint32 index)
 		{
-			AVFrame* transferred = av_frame_alloc();
-			if (!transferred || av_hwframe_transfer_data(transferred, frame, 0) < 0)
-			{
-				av_frame_free(&transferred);
+			av_frame_unref(m_transferFrame);
+			if (av_hwframe_transfer_data(m_transferFrame, frame, 0) < 0)
 				return false;
-			}
 
 			if (index >= m_decodedSliceArray.size() || !m_decodedSliceArray[index].result.imageOutput)
-			{
-				av_frame_free(&transferred);
 				return false;
-			}
 
 			const int width = frame->width;
 			const int height = H264_IsBotW() && width == 1920 && frame->height == 1088 ? 1080 : frame->height;
 			const int stride = (width + 0xFF) & ~0xFF;
-			if (transferred->format != AV_PIX_FMT_NV12 || width <= 0 || height <= 0 ||
-				(width & 1) || (height & 1) || transferred->width < width || transferred->height < height ||
-				!transferred->data[0] || !transferred->data[1] ||
-				transferred->linesize[0] < width || transferred->linesize[1] < width)
-			{
-				av_frame_free(&transferred);
+			if (m_transferFrame->format != AV_PIX_FMT_NV12 || width <= 0 || height <= 0 ||
+				(width & 1) || (height & 1) || m_transferFrame->width < width || m_transferFrame->height < height ||
+				!m_transferFrame->data[0] || !m_transferFrame->data[1] ||
+				m_transferFrame->linesize[0] < width || m_transferFrame->linesize[1] < width)
 				return false;
-			}
 
 			auto* output = static_cast<uint8*>(m_decodedSliceArray[index].result.imageOutput);
+			if (!InitializeOutputBuffer(output, width, height))
+				return false;
 			const size_t lumaSize = static_cast<size_t>(stride) * height;
 			auto* luma = output;
 			auto* chroma = output + lumaSize;
-			std::memset(luma, 0, lumaSize);
-			std::memset(chroma, 0x80, lumaSize / 2);
 			for (int row = 0; row < height; ++row)
 				std::memcpy(luma + static_cast<size_t>(row) * stride,
-					transferred->data[0] + static_cast<size_t>(row) * transferred->linesize[0], width);
+					m_transferFrame->data[0] + static_cast<size_t>(row) * m_transferFrame->linesize[0], width);
 			for (int row = 0; row < height / 2; ++row)
 				std::memcpy(chroma + static_cast<size_t>(row) * stride,
-					transferred->data[1] + static_cast<size_t>(row) * transferred->linesize[1], width);
-			av_frame_free(&transferred);
+					m_transferFrame->data[1] + static_cast<size_t>(row) * m_transferFrame->linesize[1], width);
 			return true;
 		}
 
 		bool DrainFrames(uint32 fallbackIndex)
 		{
-			AVFrame* frame = av_frame_alloc();
-			if (!frame)
-				return false;
 			bool success = true;
 			for (;;)
 			{
-				const int result = avcodec_receive_frame(m_codecContext, frame);
+				av_frame_unref(m_decodedFrame);
+				const int result = avcodec_receive_frame(m_codecContext, m_decodedFrame);
 				if (result == AVERROR(EAGAIN) || result == AVERROR_EOF)
 					break;
 				if (result < 0)
@@ -227,45 +249,43 @@ namespace H264
 					success = false;
 					break;
 				}
-				const uint32 index = FrameIndex(frame, fallbackIndex);
-				if (CopyFrame(frame, index))
-					QueueResult(index, true, frame);
+				const uint32 index = FrameIndex(m_decodedFrame, fallbackIndex);
+				if (CopyFrame(m_decodedFrame, index))
+					QueueResult(index, true, m_decodedFrame);
 				else
 					QueueResult(index, false);
-				av_frame_unref(frame);
 			}
-			av_frame_free(&frame);
 			return success;
 		}
 
 		void Decode(uint32 index)
 		{
-			if (!m_codecContext || index >= m_decodedSliceArray.size())
+			if (!m_codecContext || !m_packet || index >= m_decodedSliceArray.size())
 			{
 				QueueResult(index, false);
 				return;
 			}
 
 			auto& input = m_decodedSliceArray[index].dataToDecode;
-			AVPacket* packet = av_packet_alloc();
-			if (!packet || av_new_packet(packet, static_cast<int>(input.m_length)) < 0)
+			av_packet_unref(m_packet);
+			if (input.m_length > static_cast<uint32>(std::numeric_limits<int>::max()) ||
+				av_new_packet(m_packet, static_cast<int>(input.m_length)) < 0)
 			{
-				av_packet_free(&packet);
 				QueueResult(index, false);
 				return;
 			}
-			std::memcpy(packet->data, input.m_data, input.m_length);
-			packet->pts = index;
-			packet->dts = index;
-			packet->opaque = reinterpret_cast<void*>(static_cast<uintptr_t>(index + 1));
+			std::memcpy(m_packet->data, input.m_data, input.m_length);
+			m_packet->pts = index;
+			m_packet->dts = index;
+			m_packet->opaque = reinterpret_cast<void*>(static_cast<uintptr_t>(index + 1));
 
-			int result = avcodec_send_packet(m_codecContext, packet);
+			int result = avcodec_send_packet(m_codecContext, m_packet);
 			if (result == AVERROR(EAGAIN))
 			{
 				DrainFrames(index);
-				result = avcodec_send_packet(m_codecContext, packet);
+				result = avcodec_send_packet(m_codecContext, m_packet);
 			}
-			av_packet_free(&packet);
+			av_packet_unref(m_packet);
 			if (result < 0 || !DrainFrames(index))
 				QueueResult(index, false);
 		}
@@ -311,8 +331,12 @@ namespace H264
 
 		AVBufferRef* m_deviceContext{};
 		AVCodecContext* m_codecContext{};
+		AVPacket* m_packet{};
+		AVFrame* m_decodedFrame{};
+		AVFrame* m_transferFrame{};
 		h264ParserState_t m_parserState{};
-		std::vector<void*> m_initializedOutputBuffers;
+		std::mutex m_outputBufferMutex;
+		std::vector<OutputBufferState> m_initializedOutputBuffers;
 		int m_outputWidth{};
 		int m_outputHeight{};
 		std::thread m_decoderThread;

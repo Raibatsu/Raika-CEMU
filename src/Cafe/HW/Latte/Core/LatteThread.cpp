@@ -62,11 +62,12 @@ void LatteHandleOSScreen_prepareTextures()
 
 void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPadView);
 
-bool LatteHandleOSScreen_TV()
+bool LatteHandleOSScreen_TV(bool forceDraw = false)
 {
 	if (!LatteGPUState.osScreen.screen[0].isEnabled)
 		return false;
-	if (LatteGPUState.osScreen.screen[0].flipExecuteCount == LatteGPUState.osScreen.screen[0].flipRequestCount)
+	const bool hasNewFrame = LatteGPUState.osScreen.screen[0].flipExecuteCount != LatteGPUState.osScreen.screen[0].flipRequestCount;
+	if (!hasNewFrame && !forceDraw)
 		return false;
 	LatteHandleOSScreen_prepareTextures();
 
@@ -76,21 +77,23 @@ bool LatteHandleOSScreen_TV()
 	const uint32 bufferIndexTV = (bufferDisplayTV);
 	const uint32 bufferIndexDRC = bufferDisplayDRC;
 
-	LatteTexture_ReloadData(osScreenTVTex[bufferIndexTV]->baseTexture);
+	if (hasNewFrame)
+		LatteTexture_ReloadData(osScreenTVTex[bufferIndexTV]->baseTexture);
 
 	// TV screen
 	LatteRenderTarget_copyToBackbuffer(osScreenTVTex[bufferIndexTV]->baseTexture->baseView, false);
 	
 	if (LatteGPUState.osScreen.screen[0].flipExecuteCount != LatteGPUState.osScreen.screen[0].flipRequestCount)
 		LatteGPUState.osScreen.screen[0].flipExecuteCount.store(LatteGPUState.osScreen.screen[0].flipRequestCount);
-	return true;
+	return hasNewFrame || forceDraw;
 }
 
-bool LatteHandleOSScreen_DRC()
+bool LatteHandleOSScreen_DRC(bool forceDraw = false)
 {
 	if (!LatteGPUState.osScreen.screen[1].isEnabled)
 		return false;
-	if (LatteGPUState.osScreen.screen[1].flipExecuteCount == LatteGPUState.osScreen.screen[1].flipRequestCount)
+	const bool hasNewFrame = LatteGPUState.osScreen.screen[1].flipExecuteCount != LatteGPUState.osScreen.screen[1].flipRequestCount;
+	if (!hasNewFrame && !forceDraw)
 		return false;
 	LatteHandleOSScreen_prepareTextures();
 
@@ -98,18 +101,53 @@ bool LatteHandleOSScreen_DRC()
 
 	const uint32 bufferIndexDRC = bufferDisplayDRC;
 
-	LatteTexture_ReloadData(osScreenDRCTex[bufferIndexDRC]->baseTexture);
+	if (hasNewFrame)
+		LatteTexture_ReloadData(osScreenDRCTex[bufferIndexDRC]->baseTexture);
 
 	// GamePad screen
 	LatteRenderTarget_copyToBackbuffer(osScreenDRCTex[bufferIndexDRC]->baseTexture->baseView, true);
 
 	if (LatteGPUState.osScreen.screen[1].flipExecuteCount != LatteGPUState.osScreen.screen[1].flipRequestCount)
 		LatteGPUState.osScreen.screen[1].flipExecuteCount.store(LatteGPUState.osScreen.screen[1].flipRequestCount);
-	return true;
+	return hasNewFrame || forceDraw;
 }
 
 void LatteThread_HandleOSScreen()
 {
+#if defined(__SWITCH__)
+	const bool layoutChanged = SwitchPlatform_TakeGamePadLayoutChange();
+	if (SwitchPlatform_IsGamePadCompositeActive())
+	{
+		const bool tvChanged = LatteGPUState.osScreen.screen[0].isEnabled &&
+			LatteGPUState.osScreen.screen[0].flipExecuteCount != LatteGPUState.osScreen.screen[0].flipRequestCount;
+		const bool drcChanged = LatteGPUState.osScreen.screen[1].isEnabled &&
+			LatteGPUState.osScreen.screen[1].flipExecuteCount != LatteGPUState.osScreen.screen[1].flipRequestCount;
+		if (!tvChanged && !drcChanged && !layoutChanged)
+			return;
+		bool swapDRC = LatteHandleOSScreen_DRC(true);
+		bool swapTV = LatteHandleOSScreen_TV(true);
+		if (swapTV || swapDRC)
+		{
+			LatteRenderTarget_finalizeCompositeFrame();
+			g_renderer->SwapBuffers(swapTV, swapDRC);
+		}
+		return;
+	}
+	if (SwitchPlatform_IsGamePadOnly())
+	{
+		const bool swapDRC = LatteHandleOSScreen_DRC(layoutChanged);
+		if (swapDRC)
+			g_renderer->SwapBuffers(false, true);
+		return;
+	}
+	if (layoutChanged)
+	{
+		const bool swapTV = LatteHandleOSScreen_TV(true);
+		if (swapTV)
+			g_renderer->SwapBuffers(true, false);
+		return;
+	}
+#endif
 	bool swapTV = LatteHandleOSScreen_TV();
 	bool swapDRC = LatteHandleOSScreen_DRC();
 	if(swapTV || swapDRC)

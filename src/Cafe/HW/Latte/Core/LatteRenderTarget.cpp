@@ -16,6 +16,9 @@
 #include "Cafe/OS/libs/erreula/erreula.h"
 #include "input/InputManager.h"
 #include "Cafe/OS/libs/swkbd/swkbd.h"
+#if defined(__SWITCH__)
+#include "platform/switch/SwitchPlatform.h"
+#endif
 
 uint32 prevScissorX = 0;
 uint32 prevScissorY = 0;
@@ -683,6 +686,9 @@ void LatteRenderTarget_itHLESwapScanBuffer()
 		performanceMonitor.gpuTime_frameTime.endMeasuring();
 	LattePerformanceMonitor_frameEnd();
 	LatteGPUState.frameCounter++;
+#if defined(__SWITCH__)
+	LatteRenderTarget_finalizeCompositeFrame();
+#endif
 	g_renderer->SwapBuffers(true, true);
 
 	catchOpenGLError();
@@ -828,14 +834,31 @@ sint32 _currentOutputImageHeight = 0;
 void LatteRenderTarget_getScreenImageArea(sint32* x, sint32* y, sint32* width, sint32* height, sint32* fullWidth, sint32* fullHeight, bool padView)
 {
 	int w, h;
+	int regionX = 0;
+	int regionY = 0;
 	if(padView && WindowSystem::IsPadWindowOpen())
 		WindowSystem::GetPadWindowPhysSize(w, h);
 	else
 		WindowSystem::GetWindowPhysSize(w, h);
 
+#if defined(__SWITCH__)
+	const bool compositeGamePad = SwitchPlatform_IsGamePadCompositeActive();
+	int outputWidth = w;
+	int outputHeight = h;
+	if (compositeGamePad)
+	{
+		WindowSystem::GetWindowPhysSize(outputWidth, outputHeight);
+		SwitchPlatform_GetGamePadViewRegion(padView, outputWidth, outputHeight, regionX, regionY, w, h);
+	}
+#endif
+
 	sint32 scaledOutputX;
 	sint32 scaledOutputY;
-	if (GetConfig().fullscreen_scaling == kKeepAspectRatio)
+	if (GetConfig().fullscreen_scaling == kKeepAspectRatio
+#if defined(__SWITCH__)
+		|| compositeGamePad
+#endif
+	)
 	{
 		// calculate maximum possible resolution with intact aspect ratio
 		scaledOutputX = w;
@@ -852,14 +875,22 @@ void LatteRenderTarget_getScreenImageArea(sint32* x, sint32* y, sint32* width, s
 		scaledOutputY = h;
 	}
 
-	*x = (w - scaledOutputX) / 2;
-	*y = (h - scaledOutputY) / 2;
+	*x = regionX + (w - scaledOutputX) / 2;
+	*y = regionY + (h - scaledOutputY) / 2;
 	*width = scaledOutputX;
 	*height = scaledOutputY;
 	if (fullWidth)
-		*fullWidth = w;
+		*fullWidth =
+#if defined(__SWITCH__)
+			compositeGamePad ? outputWidth :
+#endif
+			w;
 	if (fullHeight)
-		*fullHeight = h;
+		*fullHeight =
+#if defined(__SWITCH__)
+			compositeGamePad ? outputHeight :
+#endif
+			h;
 }
 
 void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPadView)
@@ -883,6 +914,9 @@ void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPa
 	bool clearBackground = false;
 	if (imageWidth != fullscreenWidth || imageHeight != fullscreenHeight)
 		clearBackground = true;
+#if defined(__SWITCH__)
+	const bool compositeGamePad = SwitchPlatform_IsGamePadCompositeActive();
+#endif
 
 	const bool renderUpsideDown = ActiveSettings::RenderUpsideDownEnabled();
 	// force disable bicubic scaling if output resolution is equal/smaller than input resolution
@@ -962,13 +996,37 @@ void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPa
 	}
 	cemu_assert(shader);
 	g_renderer->DrawBackbufferQuad(textureView, shader, filter==LatteTextureView::MagFilter::kLinear, imageX, imageY, imageWidth, imageHeight, isPadView, clearBackground);
+#if defined(__SWITCH__)
+	if (compositeGamePad)
+	{
+		if (!isPadView)
+			g_renderer->HandleScreenshotRequest(textureView, false);
+		return;
+	}
+#endif
 	g_renderer->HandleScreenshotRequest(textureView, isPadView);
-	if (!g_renderer->ImguiBegin(!isPadView))
+	bool mainWindow = !isPadView;
+#if defined(__SWITCH__)
+	mainWindow = mainWindow || SwitchPlatform_IsGamePadOnly();
+#endif
+	if (!g_renderer->ImguiBegin(mainWindow))
 		return;
 	swkbd_render(!isPadView);
 	nn::erreula::render(!isPadView);
 	LatteOverlay_render(isPadView);
 	g_renderer->ImguiEnd();
+}
+
+void LatteRenderTarget_finalizeCompositeFrame()
+{
+#if defined(__SWITCH__)
+	if (!SwitchPlatform_IsGamePadCompositeActive() || !g_renderer->ImguiBegin(true))
+		return;
+	swkbd_render(true);
+	nn::erreula::render(true);
+	LatteOverlay_render(false);
+	g_renderer->ImguiEnd();
+#endif
 }
 
 void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uint32 colorBufferWidth, uint32 colorBufferHeight, uint32 colorBufferSliceIndex, uint32 colorBufferFormat, uint32 colorBufferPitch, Latte::E_HWTILEMODE colorBufferTilemode, uint32 colorBufferSwizzle, uint32 renderTarget)
@@ -979,6 +1037,15 @@ void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uin
 	{
 		return;
 	}
+
+#if defined(__SWITCH__)
+	if (SwitchPlatform_IsGamePadOnly())
+	{
+		if (renderTarget & RENDER_TARGET_DRC)
+			LatteRenderTarget_copyToBackbuffer(texView, true);
+		return;
+	}
+#endif
 
 	auto getVPADScreenActive = [](size_t n) -> std::pair<bool, bool> {
 		auto controller = InputManager::instance().get_vpad_controller(n);

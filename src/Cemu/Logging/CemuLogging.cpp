@@ -122,7 +122,11 @@ const std::map<LogType, std::string> g_logging_window_mapping
 
 bool cemuLog_advancedPPCLoggingEnabled()
 {
+#if defined(__SWITCH__)
+	return false;
+#else
 	return GetConfig().advanced_ppc_logging;
+#endif
 }
 
 void cemuLog_thread()
@@ -276,5 +280,9 @@ std::unique_lock<decltype(LogContext.log_mutex)> cemuLog_acquire()
 
 void cemuLog_setActiveLoggingFlags(uint64 flagMask)
 {
+#if defined(__SWITCH__)
+	(void)flagMask;
+#else
 	s_loggingFlagMask = flagMask | cemuLog_getFlag(LogType::Force);
+#endif
 }

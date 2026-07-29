@@ -34,6 +34,7 @@
 #include "gfxpacks.h"
 #include "install.h"
 #include "forwarder.h"
+#include "launcher_update.h"
 #include "SwitchStorage.h"
 #include "ui_audio.h"
 
@@ -42,18 +43,23 @@
 #define BTN_CANCEL   SDL_CONTROLLER_BUTTON_A
 #define BTN_SETTINGS SDL_CONTROLLER_BUTTON_Y
 
-static const char *DATA_DIR    = "sdmc:/switch/Cemu";
-static const char *LAUNCHER_INI= "sdmc:/switch/Cemu/launcher.ini";
-static const char *COVERS_DIR  = "sdmc:/switch/Cemu/covers";
-static const char *GAMECFG_DIR = "sdmc:/switch/Cemu/gamecfg";
-static const char *DEF_GAMEDIR = "sdmc:/switch/Cemu/games";
-static const char *SETTINGS_XML= "sdmc:/switch/Cemu/settings.xml";
-static const char *GAMEPROFILES_DIR = "sdmc:/switch/Cemu/gameProfiles";
-static const char *GRAPHICPACKS_DIR = "sdmc:/switch/Cemu/graphicPacks";
+static const char *DATA_DIR    = "sdmc:/switch/cemu";
+static const char *EMU_HOST_DIR= "sdmc:/switch/cemu/.emu";
+static const char *LAUNCHER_INI= "sdmc:/switch/cemu/launcher.ini";
+static const char *COVERS_DIR  = "sdmc:/switch/cemu/covers";
+static const char *GAMECFG_DIR = "sdmc:/switch/cemu/gamecfg";
+static const char *DEF_GAMEDIR = "sdmc:/switch/cemu/games";
+static const char *SETTINGS_XML= "sdmc:/switch/cemu/settings.xml";
+static const char *GAMEPROFILES_DIR = "sdmc:/switch/cemu/gameProfiles";
+static const char *GRAPHICPACKS_DIR = "sdmc:/switch/cemu/graphicPacks";
+static const char *LSFG_DIR = "sdmc:/switch/cemu/lsfg";
+static const char *LSFG_DLL_FILE = "sdmc:/switch/cemu/lsfg/Lossless.dll";
+static const char *LAUNCHER_NRO = "sdmc:/switch/cemu/cemu.nro";
+static std::string g_launcherNroPath = LAUNCHER_NRO;
 static const char *EMU_NRO_SRC = "romfs:/emu/cemu_vk.nro";
 static const char *EMU_HASH_SRC = "romfs:/emu/cemu_vk.sha256";
-static const char *EMU_NRO_DST = "sdmc:/switch/Cemu/cemu_vk.nro";
-static const char *LAUNCH_HANDOFF = "sdmc:/switch/Cemu/switch.ini";
+static const char *EMU_NRO_DST = "sdmc:/switch/cemu/.emu/cemu_vk.nro";
+static const char *LAUNCH_HANDOFF = "sdmc:/switch/cemu/switch.ini";
 
 struct KV { std::string k, v; };
 struct Store { std::vector<KV> kv; };
@@ -65,14 +71,27 @@ static Store g_containerTitles;
 static Store *g_active = &g_global;
 static int g_systemCemuLanguage = 1;
 static const char *g_systemLanguageName = "English";
-static const char *TITLES_INI = "sdmc:/switch/Cemu/titles.ini";
-static const char *CONTAINER_TITLES_INI = "sdmc:/switch/Cemu/container_titles.ini";
+static const char *TITLES_INI = "sdmc:/switch/cemu/titles.ini";
+static const char *CONTAINER_TITLES_INI = "sdmc:/switch/cemu/container_titles.ini";
 
 static std::string trim(const std::string &s) {
   size_t a = s.find_first_not_of(" \t\r\n");
   if (a == std::string::npos) return "";
   size_t b = s.find_last_not_of(" \t\r\n");
   return s.substr(a, b - a + 1);
+}
+
+static void setLauncherPathFromArg(const char *path) {
+  if(!path||!path[0]) return;
+  std::string candidate=path;
+  std::replace(candidate.begin(),candidate.end(),'\\','/');
+  if(candidate.rfind("sdmc:/",0)!=0||candidate.find("/../")!=std::string::npos||
+     candidate.find("/./")!=std::string::npos) return;
+  std::string lowercase=candidate;
+  std::transform(lowercase.begin(),lowercase.end(),lowercase.begin(),
+    [](unsigned char value){ return (char)std::tolower(value); });
+  if(lowercase.size()<4||lowercase.compare(lowercase.size()-4,4,".nro")!=0) return;
+  g_launcherNroPath=std::move(candidate);
 }
 static const char *storeGet(Store &s, const char *key, const char *def) {
   for (auto &e : s.kv) if (e.k == key) return e.v.c_str();
@@ -222,6 +241,9 @@ static const Choice C_lang[]     = { {"Auto","-1"}, {"Japanese","0"}, {"English"
                                      {"Italian","4"}, {"Spanish","5"}, {"Chinese","6"}, {"Korean","7"},
                                      {"Dutch","8"}, {"Portuguese","9"}, {"Russian","10"}, {"Taiwanese","11"} };
 static const Choice C_ctype[]    = { {"Wii U GamePad","GamePad"}, {"Pro Controller","Pro"}, {"Classic Controller","Classic"} };
+static const Choice C_gamepadLayout[] = { {"TV only","off"}, {"PAD only","pad"}, {"PAD on right","right"}, {"PAD on left","left"},
+                                           {"PAD below TV","below"}, {"PAD above TV","above"} };
+static const Choice C_lsfgFlowScale[] = { {"Quarter resolution","0.25"}, {"Half resolution","0.5"} };
 static const Choice C_players[]  = { {"1","1"}, {"2","2"}, {"3","3"}, {"4","4"},
                                      {"5","5"}, {"6","6"}, {"7","7"}, {"8","8"} };
 struct InputMapping { const char *label, *emu, *key, *def; };
@@ -236,12 +258,12 @@ static const InputMapping C_inputMappings[] = {
   {"L-Stick click", "StickL", "in_StickL", "LCLICK"},
   {"R-Stick click", "StickR", "in_StickR", "RCLICK"},
 };
-static const Choice C_launcherTheme[] = { {"Bubbles","homebrew"}, {"Glow","animated"},
+static const Choice C_launcherTheme[] = { {"XMB (PS3)","xmb"}, {"Bubbles","homebrew"}, {"Glow","animated"},
                                           {"Classic","classic"}, {"OLED black","oled"} };
 static const Choice C_gridColumns[] = { {"3","3"}, {"4","4"}, {"5","5"}, {"6","6"}, {"7","7"}, {"8","8"} };
 static const Choice C_gridRows[] = { {"1","1"}, {"2","2"}, {"3","3"} };
 
-enum { SCR_CPU, SCR_GRAPHICS, SCR_AUDIO, SCR_OVERLAY, SCR_INPUT, SCR_COUNT };
+enum { SCR_CPU, SCR_GRAPHICS, SCR_FRAMEGEN, SCR_AUDIO, SCR_OVERLAY, SCR_INPUT, SCR_ACCESSORIES, SCR_COUNT };
 
 static const Opt S_cpu[] = {
   O_CHOICE("CPU mode",         "cpuMode",       C_cpumode, "3"),
@@ -256,12 +278,18 @@ static const Opt S_graphics[] = {
   O_CHOICE("Upscale filter",        "UpscaleFilter",     C_filter,  "1"),
   O_CHOICE("Downscale filter",      "DownscaleFilter",   C_filter,  "0"),
   O_CHOICE("Fullscreen scaling",    "FullscreenScaling", C_scaling, "0"),
+  O_CHOICE("GamePad screen",        "GamePadLayout",     C_gamepadLayout, "off"),
 };
 static const Opt S_audio[] = {
   O_RANGE ("TV volume",        "TVVolume",    0, 100, 5, "50"),
   O_CHOICE("GamePad audio",    "PadAudio",    C_bool,    "true"),
   O_RANGE ("GamePad volume",   "PadVolume",   0, 100, 5, "50"),
   O_RANGE ("Audio latency",    "AudioDelay",  0, 23,  1, "2"),
+};
+static const Opt S_framegen[] = {
+  O_CHOICE("LSFG 2x (Vulkan)", "Wrapper/LSFGEnabled", C_bool, "false"),
+  O_CHOICE("Flow resolution", "Wrapper/LSFGFlowScale", C_lsfgFlowScale, "0.25"),
+  O_CHOICE("Performance mode", "Wrapper/LSFGPerformance", C_bool, "true"),
 };
 static const Opt S_overlay[] = {
   O_CHOICE("FPS counter",      "OverlayFPS",         C_bool,  "false"),
@@ -276,6 +304,11 @@ static const Opt S_input[] = {
   O_RANGE ("Stick dead zone",  "in_deadzone", 0, 50, 1, "15"),
   O_ACTION("Control mapping"),
 };
+static const Opt S_accessories[] = {
+  O_CHOICE("Skylanders Portal",      "UsbSkylanders", C_bool, "false"),
+  O_CHOICE("Disney Infinity Base",   "UsbInfinity",   C_bool, "false"),
+  O_CHOICE("LEGO Dimensions Toypad", "UsbDimensions", C_bool, "false"),
+};
 static const Opt S_launcher[] = {
   O_CHOICE("Theme",             "Wrapper/Theme",          C_launcherTheme, "homebrew"),
   O_CHOICE("Games per row",     "Wrapper/GridColumns",    C_gridColumns,   "5"),
@@ -283,14 +316,17 @@ static const Opt S_launcher[] = {
   O_CHOICE("Show game titles",  "Wrapper/ShowGameTitles", C_bool,          "true"),
   O_CHOICE("UI animations",     "Wrapper/UiAnimations",   C_bool,          "true"),
   O_CHOICE("Sound effects",     "Wrapper/UiSounds",       C_bool,          "true"),
+  O_CHOICE("Check updates at boot", "Wrapper/CheckUpdatesAtBoot", C_bool,   "true"),
 };
 struct Screen { const char *title; const Opt *opts; int n; };
 static const Screen g_screens[SCR_COUNT] = {
   { "CPU / Emulation",   S_cpu,      (int)(sizeof(S_cpu)/sizeof(Opt)) },
   { "Graphics",          S_graphics, (int)(sizeof(S_graphics)/sizeof(Opt)) },
+  { "Frame Generation",  S_framegen, (int)(sizeof(S_framegen)/sizeof(Opt)) },
   { "Audio",             S_audio,    (int)(sizeof(S_audio)/sizeof(Opt)) },
   { "Overlay",           S_overlay,  (int)(sizeof(S_overlay)/sizeof(Opt)) },
   { "Controller / Input",S_input,    (int)(sizeof(S_input)/sizeof(Opt)) },
+  { "USB Accessories",   S_accessories, (int)(sizeof(S_accessories)/sizeof(Opt)) },
 };
 
 static void detectSystemLanguage() {
@@ -369,7 +405,7 @@ static bool writeInputIni(const std::vector<CemuKV> &eff) {
   text += "[map]\n";
   for (const auto &mapping : C_inputMappings)
     text += std::string(mapping.emu) + " = " + cemuKVGet(eff, mapping.key, mapping.def) + "\n";
-  return writeAtomicText("sdmc:/switch/Cemu/input.ini", text);
+  return writeAtomicText("sdmc:/switch/cemu/input.ini", text);
 }
 
 static bool appendHandoffValue(std::string &text, const char *key, const std::string &value) {
@@ -382,7 +418,7 @@ static bool appendHandoffValue(std::string &text, const char *key, const std::st
   return true;
 }
 
-static const char *ENABLED_PACKS_FILE = "sdmc:/switch/Cemu/enabled_packs.txt";
+static const char *ENABLED_PACKS_FILE = "sdmc:/switch/cemu/enabled_packs.txt";
 static bool readEnabledPacks(std::vector<CemuGraphicPack> &out) {
   out.clear();
   if (!recoverAtomicFile(ENABLED_PACKS_FILE)) return false;
@@ -426,8 +462,11 @@ static bool g_imgReady = false;
 static bool g_plReady = false;
 static bool g_griddbReady = false;
 static bool g_storageSocketReady = false;
+static std::string g_updateNoticeTag;
+static std::string g_updateNotifiedTag;
+static Uint32 g_updateNoticeUntil = 0;
 
-enum class LauncherTheme { Bubbles, Glow, Classic, Oled };
+enum class LauncherTheme { Xmb, Bubbles, Glow, Classic, Oled };
 static LauncherTheme g_launcherTheme = LauncherTheme::Bubbles;
 static bool g_uiAnimations = true;
 static bool g_showGameTitles = true;
@@ -566,13 +605,18 @@ static void applyLauncherAppearance() {
   const char *theme = storeGet(g_global, "Wrapper/Theme", "homebrew");
   g_launcherTheme = !strcmp(theme, "classic") ? LauncherTheme::Classic :
                     !strcmp(theme, "oled") ? LauncherTheme::Oled :
-                    !strcmp(theme, "animated") ? LauncherTheme::Glow : LauncherTheme::Bubbles;
+                    !strcmp(theme, "animated") ? LauncherTheme::Glow :
+                    !strcmp(theme, "xmb") ? LauncherTheme::Xmb : LauncherTheme::Bubbles;
   g_uiAnimations = strcmp(storeGet(g_global, "Wrapper/UiAnimations", "true"), "false") != 0;
   g_showGameTitles = strcmp(storeGet(g_global, "Wrapper/ShowGameTitles", "true"), "false") != 0;
   g_gridColumns = std::max(3, std::min(8, atoi(storeGet(g_global, "Wrapper/GridColumns", "5"))));
   g_gridRows = std::max(1, std::min(3, atoi(storeGet(g_global, "Wrapper/GridRows", "2"))));
 
-  if (g_launcherTheme == LauncherTheme::Classic) {
+  if (g_launcherTheme == LauncherTheme::Xmb) {
+    COL_BG={2,35,92,255}; COL_TXT={246,250,255,255}; COL_DIM={176,207,233,255};
+    COL_HI={151,229,255,255}; COL_VAL={255,255,255,255}; COL_SEL={116,218,255,255};
+    COL_PANEL={4,28,73,164}; COL_CARD={5,36,86,196}; COL_FOCUS={20,91,148,214};
+  } else if (g_launcherTheme == LauncherTheme::Classic) {
     COL_BG={22,24,30,255}; COL_TXT={228,230,235,255}; COL_DIM={150,155,165,255};
     COL_HI={96,200,255,255}; COL_VAL={255,210,100,255}; COL_SEL={255,170,0,255};
     COL_PANEL={28,31,40,255}; COL_CARD={24,26,34,255}; COL_FOCUS={66,56,30,235};
@@ -617,7 +661,7 @@ static void ensureGlowTexture() {
 }
 
 static bool hasAnimatedBackground() {
-  return g_launcherTheme==LauncherTheme::Bubbles||g_launcherTheme==LauncherTheme::Glow;
+  return g_launcherTheme==LauncherTheme::Xmb||g_launcherTheme==LauncherTheme::Bubbles||g_launcherTheme==LauncherTheme::Glow;
 }
 
 static void drawGlow(float x,float y,float radius,Uint8 red,Uint8 green,Uint8 blue,Uint8 alpha) {
@@ -641,6 +685,90 @@ static void drawBackgroundParticles(float time,SDL_Color color,int count,float s
 
 static Uint8 blendChannel(Uint8 first,Uint8 second,float amount) {
   return (Uint8)(first+(second-first)*std::clamp(amount,0.f,1.f));
+}
+
+static float xmbWaveY(float x,float time,float center,float amplitude,float frequency,float slope,float phase) {
+  const float primary=sinf(x*6.2831853f*frequency+phase+time*0.115f);
+  const float detail=sinf(x*6.2831853f*(frequency*2.07f)+phase*0.61f-time*0.072f);
+  return center+slope*(x-0.5f)+amplitude*(primary+detail*0.24f);
+}
+
+static void drawXmbRibbon(float time,float center,float amplitude,float frequency,float slope,float phase,
+                          int halfWidth,SDL_Color color) {
+  constexpr int pointCount=121;
+  std::array<SDL_Point,pointCount> points{};
+  for(int offset=-halfWidth;offset<=halfWidth;offset++){
+    float distance=halfWidth?fabsf((float)offset/halfWidth):0.f;
+    Uint8 alpha=(Uint8)(color.a*powf(std::max(0.f,1.f-distance),1.45f));
+    if(alpha<2) continue;
+    for(int point=0;point<pointCount;point++){
+      float x=(float)point/(pointCount-1);
+      points[point]={(int)(x*SW),(int)(xmbWaveY(x,time,center,amplitude,frequency,slope,phase)*SH)+offset};
+    }
+    SDL_SetRenderDrawColor(g_ren,color.r,color.g,color.b,alpha);
+    SDL_RenderDrawLines(g_ren,points.data(),pointCount);
+  }
+}
+
+static void drawXmbFilament(float time,float center,float amplitude,float frequency,float slope,float phase,
+                            SDL_Color color) {
+  constexpr int pointCount=161;
+  std::array<SDL_Point,pointCount> points{};
+  for(int point=0;point<pointCount;point++){
+    float x=(float)point/(pointCount-1);
+    points[point]={(int)(x*SW),(int)(xmbWaveY(x,time,center,amplitude,frequency,slope,phase)*SH)};
+  }
+  SDL_SetRenderDrawColor(g_ren,color.r,color.g,color.b,color.a);
+  SDL_RenderDrawLines(g_ren,points.data(),pointCount);
+}
+
+static void drawXmbSparkles(float time) {
+  for(int index=0;index<42;index++){
+    float x=fmodf(index*0.618034f+time*(0.0022f+(index%5)*0.00045f),1.08f)-0.04f;
+    float y=xmbWaveY(x,time,0.585f,0.095f,0.91f,0.075f,0.4f)+
+            (fmodf(index*0.413f,1.f)-0.5f)*0.31f;
+    float pulse=0.5f+0.5f*sinf(time*(0.55f+(index%7)*0.08f)+index*1.731f);
+    Uint8 alpha=(Uint8)(28.f+pulse*(index%9==0?142.f:82.f));
+    int px=(int)(x*SW),py=(int)(y*SH);
+    fillRect(px,py,index%9==0?3:2,index%9==0?3:2,(SDL_Color){220,246,255,alpha});
+    if(index%9==0&&pulse>0.55f){
+      SDL_SetRenderDrawColor(g_ren,235,251,255,(Uint8)(alpha*0.62f));
+      SDL_RenderDrawLine(g_ren,px-5,py+1,px+7,py+1);
+      SDL_RenderDrawLine(g_ren,px+1,py-5,px+1,py+7);
+    }
+  }
+}
+
+static void drawXmbBackground(float time) {
+  const SDL_Color top={3,37,102,255},middle={8,93,184,255},bottom={0,20,68,255};
+  constexpr int bands=72;
+  for(int band=0;band<bands;band++){
+    float y=(band+0.5f)/bands;
+    SDL_Color color{};
+    if(y<0.52f){
+      float amount=y/0.52f;
+      color={blendChannel(top.r,middle.r,amount),blendChannel(top.g,middle.g,amount),blendChannel(top.b,middle.b,amount),255};
+    } else {
+      float amount=(y-0.52f)/0.48f;
+      color={blendChannel(middle.r,bottom.r,amount),blendChannel(middle.g,bottom.g,amount),blendChannel(middle.b,bottom.b,amount),255};
+    }
+    int y0=band*SH/bands,y1=(band+1)*SH/bands;
+    fillRect(0,y0,SW,y1-y0,color);
+  }
+  if(g_glowTexture){
+    drawGlow(0.10f,0.43f,1.18f,55,157,255,54);
+    drawGlow(0.84f,0.38f,0.92f,41,112,228,42);
+  }
+  drawXmbRibbon(time,0.655f,0.082f,0.78f,-0.105f,2.15f,std::max(12,SH/18),(SDL_Color){63,166,255,31});
+  drawXmbRibbon(time,0.575f,0.074f,0.96f,0.080f,0.35f,std::max(10,SH/25),(SDL_Color){189,235,255,48});
+  drawXmbRibbon(time,0.605f,0.049f,1.28f,-0.025f,3.82f,std::max(5,SH/54),(SDL_Color){230,250,255,72});
+  for(int trace=0;trace<9;trace++){
+    float offset=(trace-4)*0.009f;
+    drawXmbFilament(time,0.588f+offset,0.083f+trace*0.0017f,0.91f,0.052f,
+                    0.62f+trace*0.19f,(SDL_Color){202,241,255,(Uint8)(18+trace%3*8)});
+  }
+  drawXmbFilament(time,0.578f,0.073f,0.96f,0.080f,0.35f,(SDL_Color){243,253,255,136});
+  drawXmbSparkles(time);
 }
 
 static void drawBubble(int centerX,int centerY,int radius,Uint8 alpha) {
@@ -722,6 +850,11 @@ static void clearUiBackground() {
   if(!hasAnimatedBackground()) return;
   ensureGlowTexture();
   float time=g_uiAnimations?SDL_GetTicks()/1000.f:0.f;
+  if(g_launcherTheme==LauncherTheme::Xmb){
+    drawXmbBackground(time);
+    if(g_glowTexture){ SDL_SetTextureColorMod(g_glowTexture,255,255,255); SDL_SetTextureAlphaMod(g_glowTexture,255); }
+    return;
+  }
   if(g_launcherTheme==LauncherTheme::Bubbles){
     drawBubblesBackground(time);
     if(g_glowTexture){ SDL_SetTextureColorMod(g_glowTexture,255,255,255); SDL_SetTextureAlphaMod(g_glowTexture,255); }
@@ -814,6 +947,10 @@ static void toast(const char *msg);
 static void modalMessage(const char *title, const std::vector<std::string> &lines);
 static void gfxPackScreen(uint64_t filterTitleId);
 static bool confirmBox(const char *title, const std::vector<std::string> &lines);
+static void runUpdateScreen();
+static std::string installedReleaseTag();
+static void pollUpdateNotification();
+static void drawUpdateNotification();
 static int dropdown(const char *title, const char *const *labels, int n, int cur);
 static void ensureDefaultGameSource();
 static void beginScreenFx();
@@ -1111,7 +1248,7 @@ enum { SORT_ALPHA, SORT_RECENT, SORT_ADDED, SORT_COUNT };
 static const char *SORT_NAME[SORT_COUNT] = { "A-Z", "Recently played", "Recently added" };
 static int g_sort = SORT_ALPHA;
 static Store g_recent;
-static const char *RECENT_INI = "sdmc:/switch/Cemu/recent.ini";
+static const char *RECENT_INI = "sdmc:/switch/cemu/recent.ini";
 
 static int detectRegion(const std::string &file) {
   std::string tags; int depth = 0;
@@ -2730,6 +2867,19 @@ static void runSettings(int scr, const char *ctx) {
   if(sel<0||sel>=S.n) sel=0;
   if(top<0||top>=S.n) top=0;
   auto nav=[&](int dir){ sel=(sel+dir+S.n)%S.n; };
+  auto adjust=[&](const Opt &option,int direction){
+    optAdjust(option,direction);
+    if(scr==SCR_FRAMEGEN && option.key && !strcmp(option.key,"Wrapper/LSFGEnabled") &&
+       !strcmp(iniGet(option.key,option.def),"true") && !regularFileExists(LSFG_DLL_FILE)){
+      iniSet(option.key,"false");
+      modalMessage("LSFG is not ready", {
+        "Lossless.dll was not found.",
+        "Copy it to sdmc:/switch/cemu/lsfg/Lossless.dll",
+        "then enable LSFG again."
+      });
+      beginScreenFx();
+    }
+  };
   beginScreenFx();
   for(;;){
     if (!beginUiFrame()) return;
@@ -2740,8 +2890,8 @@ static void runSettings(int scr, const char *ctx) {
       { int tx=0,ty=0; TouchKind tk=touchFeed(e,&tx,&ty);
         int visible=listVis();
         if(touchScrollList(tk,sel,top,S.n,visible)){ s_setSel[scr]=sel; s_setTop[scr]=top; continue; }
-        if(tk==TOUCH_SWIPE_L){ optAdjust(S.opts[sel],-1); continue; }
-        if(tk==TOUCH_SWIPE_R){ optAdjust(S.opts[sel],+1); continue; }
+        if(tk==TOUCH_SWIPE_L){ adjust(S.opts[sel],-1); continue; }
+        if(tk==TOUCH_SWIPE_R){ adjust(S.opts[sel],+1); continue; }
         if(tk==TOUCH_TAP){
           if(ty<topBarH() || ty>=SH-40){ return; }
           int colX,colW,labelX,valX; listCol(&colX,&colW,&labelX,&valX); int vis=listVis();
@@ -2756,13 +2906,13 @@ static void runSettings(int scr, const char *ctx) {
       switch(e.cbutton.button){
         case SDL_CONTROLLER_BUTTON_DPAD_UP:   nav(-1); break;
         case SDL_CONTROLLER_BUTTON_DPAD_DOWN: nav(+1); break;
-        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  optAdjust(S.opts[sel],-1); break;
-        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: optAdjust(S.opts[sel], 1); break;
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  adjust(S.opts[sel],-1); break;
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: adjust(S.opts[sel], 1); break;
         case BTN_CONFIRM: {
           const Opt &o=S.opts[sel];
           if(o.type==OT_ACTION && scr==SCR_INPUT){ runInputMappingScreen(); beginScreenFx(); }
           else if(o.type==OT_CHOICE && o.nch>2){ optChoosePopup(o); beginScreenFx(); }
-          else optAdjust(o,1);
+          else adjust(o,1);
           break;
         }
         case BTN_CANCEL: return;
@@ -2775,11 +2925,33 @@ static void runSettings(int scr, const char *ctx) {
   }
 }
 
+static std::string launcherUpdateStatusText() {
+  const LauncherUpdateSnapshot snapshot=LauncherUpdate_GetSnapshot();
+  switch(snapshot.state){
+    case LauncherUpdateState::Checking: return "Checking...";
+    case LauncherUpdateState::UpdateAvailable: return snapshot.release.tag+" available";
+    case LauncherUpdateState::UpToDate: return "Up to date";
+    case LauncherUpdateState::Downloading: {
+      const uint64_t total=snapshot.total?snapshot.total:snapshot.release.assetSize;
+      const uint64_t percent=total?std::min<uint64_t>(100,snapshot.downloaded*100/total):0;
+      return "Downloading "+std::to_string(percent)+"%";
+    }
+    case LauncherUpdateState::ReadyToInstall: return "Ready to install";
+    case LauncherUpdateState::Installing: return "Installing...";
+    case LauncherUpdateState::Installed: return "Ready to exit";
+    case LauncherUpdateState::Cancelled: return "Cancelled";
+    case LauncherUpdateState::Error: return "Check failed";
+    case LauncherUpdateState::Idle: break;
+  }
+  return std::string("Installed ")+installedReleaseTag();
+}
+
 static void launcherSettingsScreen() {
   static int savedSelection=0;
   const int optionCount=(int)(sizeof(S_launcher)/sizeof(Opt));
-  const int rowCount=optionCount+1;
-  int sel=std::max(0,std::min(savedSelection,rowCount-1)),top=0;
+  const int coversRow=optionCount,listCount=optionCount+1;
+  const int updateRow=listCount,selectionCount=listCount+1;
+  int sel=std::max(0,std::min(savedSelection,selectionCount-1)),top=0;
   auto applyChange=[&](){
     applyLauncherAppearance();
     uiAudioSetEnabled(strcmp(storeGet(g_global,"Wrapper/UiSounds","true"),"false")!=0);
@@ -2792,13 +2964,21 @@ static void launcherSettingsScreen() {
     while(pollUiEvent(event)){
       pumpStick(event);
       int tx=0,ty=0; TouchKind touch=touchFeed(event,&tx,&ty);
-      int visible=std::min(listVis(),rowCount);
-      if(touchScrollList(touch,sel,top,rowCount,visible)) continue;
+      const int visible=std::min(std::max(1,(SH-LIST_Y0-190)/ROW_H),listCount);
+      const int buttonWidth=std::min(500,SW-80),buttonHeight=58;
+      const int buttonX=(SW-buttonWidth)/2;
+      const int buttonY=std::min(SH-buttonHeight-104,LIST_Y0+visible*ROW_H+24);
+      if(touchScrollList(touch,sel,top,listCount,visible)) continue;
       if(touch==TOUCH_SWIPE_L&&sel<optionCount){ optAdjust(S_launcher[sel],-1); applyChange(); continue; }
       if(touch==TOUCH_SWIPE_R&&sel<optionCount){ optAdjust(S_launcher[sel],1); applyChange(); continue; }
       if(touch==TOUCH_TAP){
         if(ty<topBarH()||ty>=SH-40){ finish(); return; }
-        for(int row=0;row<visible&&top+row<rowCount;row++){
+        if(tx>=buttonX&&tx<buttonX+buttonWidth&&ty>=buttonY&&ty<buttonY+buttonHeight){
+          sel=updateRow;
+          SDL_Event press{}; press.type=SDL_CONTROLLERBUTTONDOWN; press.cbutton.button=BTN_CONFIRM; SDL_PushEvent(&press);
+          continue;
+        }
+        for(int row=0;row<visible&&top+row<listCount;row++){
           int y=LIST_Y0+row*ROW_H;
           if(ty>=y&&ty<y+ROW_H){
             sel=top+row;
@@ -2809,12 +2989,13 @@ static void launcherSettingsScreen() {
         continue;
       }
       if(event.type!=SDL_CONTROLLERBUTTONDOWN) continue;
-      if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_UP) sel=(sel+rowCount-1)%rowCount;
-      else if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_DOWN) sel=(sel+1)%rowCount;
+      if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_UP) sel=(sel+selectionCount-1)%selectionCount;
+      else if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_DOWN) sel=(sel+1)%selectionCount;
       else if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_LEFT&&sel<optionCount){ optAdjust(S_launcher[sel],-1); applyChange(); }
       else if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_RIGHT&&sel<optionCount){ optAdjust(S_launcher[sel],1); applyChange(); }
       else if(event.cbutton.button==BTN_CONFIRM){
-        if(sel==optionCount){ downloadAllCovers(); beginScreenFx(); }
+        if(sel==updateRow){ runUpdateScreen(); beginScreenFx(); }
+        else if(sel==coversRow){ downloadAllCovers(); beginScreenFx(); }
         else {
           const Opt &option=S_launcher[sel];
           if(option.type==OT_CHOICE&&option.nch>2){ optChoosePopup(option); beginScreenFx(); }
@@ -2822,22 +3003,27 @@ static void launcherSettingsScreen() {
           applyChange();
         }
       } else if(event.cbutton.button==BTN_CANCEL){ finish(); return; }
-      if(sel<top) top=sel;
-      if(sel>=top+visible) top=sel-visible+1;
+      if(sel<listCount){
+        if(sel<top) top=sel;
+        if(sel>=top+visible) top=sel-visible+1;
+      }
     }
 
     clearUiBackground();
     drawHeader("Launcher",nullptr);
     int colX,colW,labelX,valX; listCol(&colX,&colW,&labelX,&valX);
-    int visible=std::min(listVis(),rowCount),fontHeight=TTF_FontHeight(g_font);
+    const int visible=std::min(std::max(1,(SH-LIST_Y0-190)/ROW_H),listCount);
+    const int fontHeight=TTF_FontHeight(g_font);
     glassPanel(colX-12,LIST_Y0-10,colW+24,visible*ROW_H+18);
-    float target=(float)(LIST_Y0+(sel-top)*ROW_H+1);
-    g_hy=(!g_uiAnimations||g_hy<0)?target:g_hy+(target-g_hy)*0.30f;
-    fillRect(colX,(int)g_hy,colW,ROW_H-2,COL_FOCUS);
-    fillRect(colX,(int)g_hy,5,ROW_H-2,COL_SEL);
-    for(int row=0;row<visible&&top+row<rowCount;row++){
+    if(sel<listCount){
+      float target=(float)(LIST_Y0+(sel-top)*ROW_H+1);
+      g_hy=(!g_uiAnimations||g_hy<0)?target:g_hy+(target-g_hy)*0.30f;
+      fillRect(colX,(int)g_hy,colW,ROW_H-2,COL_FOCUS);
+      fillRect(colX,(int)g_hy,5,ROW_H-2,COL_SEL);
+    }
+    for(int row=0;row<visible&&top+row<listCount;row++){
       int index=top+row,y=LIST_Y0+row*ROW_H+(ROW_H-fontHeight)/2; bool current=index==sel;
-      if(index==optionCount){
+      if(index==coversRow){
         drawText(g_font,labelX,y,"Download all covers",current?COL_VAL:COL_TXT);
         drawTextR(g_font_sm,valX,y+(fontHeight-TTF_FontHeight(g_font_sm))/2,"SteamGridDB",current?COL_VAL:COL_DIM);
       } else {
@@ -2846,6 +3032,15 @@ static void launcherSettingsScreen() {
         drawTextR(g_font,valX,y,value,current?COL_VAL:COL_DIM);
       }
     }
+    const int buttonWidth=std::min(500,SW-80),buttonHeight=58;
+    const int buttonX=(SW-buttonWidth)/2;
+    const int buttonY=std::min(SH-buttonHeight-104,LIST_Y0+visible*ROW_H+24);
+    const bool updateSelected=sel==updateRow;
+    fillRect(buttonX,buttonY,buttonWidth,buttonHeight,updateSelected?COL_FOCUS:(SDL_Color){35,40,50,225});
+    border(buttonX,buttonY,buttonWidth,buttonHeight,2,updateSelected?COL_SEL:COL_DIM);
+    drawTextC(g_font,SW/2,buttonY+(buttonHeight-fontHeight)/2,"Check for Updates",updateSelected?COL_VAL:COL_TXT);
+    const std::string updateStatus=launcherUpdateStatusText();
+    drawTextC(g_font_sm,SW/2,buttonY+buttonHeight+8,updateStatus.c_str(),updateSelected?COL_VAL:COL_DIM);
     drawTextC(g_font_sm,SW/2,SH-38,"Left / Right  Change       A  Choose       B  Back",COL_DIM);
     drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
@@ -3442,7 +3637,7 @@ static void onlineSettingsScreen() {
 }
 
 static void runSettingsRoot(const char *ctx) {
-  static const int order[] = { SCR_CPU, SCR_GRAPHICS, SCR_AUDIO, SCR_OVERLAY, SCR_INPUT };
+  static const int order[] = { SCR_FRAMEGEN, SCR_CPU, SCR_GRAPHICS, SCR_AUDIO, SCR_OVERLAY, SCR_INPUT, SCR_ACCESSORIES };
   const int nscr=(int)(sizeof(order)/sizeof(*order));
   bool global = !(ctx && *ctx);
   int launcherRow=0,libraryRow=1,onlineRow=2,screenStart=3,langRow=screenStart+nscr,gfxRow=langRow+1;
@@ -3508,8 +3703,8 @@ static void runSettingsRoot(const char *ctx) {
         drawTextR(g_font_sm,valX,slot+(rowH-TTF_FontHeight(g_font_sm))/2,"browse / download",cur?COL_VAL:COL_DIM);
       } else if(global && i==launcherRow){
         const char *theme=storeGet(g_global,"Wrapper/Theme","homebrew");
-        const char *value=!strcmp(theme,"animated")?"Glow":
-                          (!strcmp(theme,"classic")?"Classic":(!strcmp(theme,"oled")?"OLED black":"Bubbles"));
+        const char *value=!strcmp(theme,"xmb")?"XMB (PS3)":(!strcmp(theme,"animated")?"Glow":
+                          (!strcmp(theme,"classic")?"Classic":(!strcmp(theme,"oled")?"OLED black":"Bubbles")));
         drawText(g_font,labelX,y,"Launcher",cur?COL_VAL:COL_TXT);
         drawTextR(g_font_sm,valX,slot+(rowH-TTF_FontHeight(g_font_sm))/2,value,cur?COL_VAL:COL_DIM);
       } else if(global && i==libraryRow){
@@ -3595,6 +3790,238 @@ static bool confirmBox(const char *title, const std::vector<std::string> &lines)
     drawTextC(g_font,nox+bw/2,bby+(bh-fh)/2,"No  (B)",COL_TXT);
     SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
+}
+
+static std::string installedReleaseTag() {
+  const std::string built=LauncherUpdate_BuiltReleaseTag();
+#if defined(CEMU_SWITCH_UPDATE_TEST)
+  return built;
+#else
+  const std::string stored=storeGet(g_global,"Wrapper/InstalledReleaseTag","");
+  if(stored.empty()) return built;
+  return LauncherUpdate_IsNewer(stored,built)?stored:built;
+#endif
+}
+
+static std::vector<size_t> utf8Boundaries(const std::string &text) {
+  std::vector<size_t> boundaries{0};
+  for(size_t index=0;index<text.size();){
+    const unsigned char lead=(unsigned char)text[index];
+    size_t length=lead<0x80?1:(lead&0xe0)==0xc0?2:(lead&0xf0)==0xe0?3:(lead&0xf8)==0xf0?4:1;
+    if(index+length>text.size()) length=1;
+    for(size_t part=1;part<length;part++) if(((unsigned char)text[index+part]&0xc0)!=0x80){ length=1; break; }
+    index+=length;
+    boundaries.push_back(index);
+  }
+  return boundaries;
+}
+
+static std::vector<std::string> wrapReleaseNotes(const std::string &notes,int maxWidth) {
+  std::vector<std::string> lines;
+  size_t paragraphStart=0;
+  while(paragraphStart<=notes.size()){
+    size_t paragraphEnd=notes.find('\n',paragraphStart);
+    if(paragraphEnd==std::string::npos) paragraphEnd=notes.size();
+    std::string paragraph=notes.substr(paragraphStart,paragraphEnd-paragraphStart);
+    if(!paragraph.empty()&&paragraph.back()=='\r') paragraph.pop_back();
+    for(char &value:paragraph) if(value=='\t'||(unsigned char)value<0x20) value=' ';
+    while(!paragraph.empty()&&paragraph.back()==' ') paragraph.pop_back();
+    if(paragraph.empty()) lines.emplace_back();
+    else {
+      bool continuation=false;
+      while(!paragraph.empty()){
+        while(!paragraph.empty()&&paragraph.front()==' ') paragraph.erase(paragraph.begin());
+        if(paragraph.empty()) break;
+        const std::string prefix=continuation&&paragraph.rfind("- ",0)!=0?"  ":"";
+        if(textW(g_font_sm,(prefix+paragraph).c_str())<=maxWidth){ lines.push_back(prefix+paragraph); break; }
+        const auto boundaries=utf8Boundaries(paragraph);
+        size_t low=1,high=boundaries.size()-1;
+        while(low<high){
+          size_t middle=(low+high+1)/2;
+          if(textW(g_font_sm,(prefix+paragraph.substr(0,boundaries[middle])).c_str())<=maxWidth) low=middle;
+          else high=middle-1;
+        }
+        size_t split=boundaries[low];
+        size_t space=paragraph.rfind(' ',split);
+        if(space!=std::string::npos&&space>0&&space>=split/3) split=space;
+        lines.push_back(prefix+paragraph.substr(0,split));
+        paragraph.erase(0,split);
+        continuation=true;
+      }
+    }
+    if(paragraphEnd==notes.size()) break;
+    paragraphStart=paragraphEnd+1;
+  }
+  if(lines.empty()) lines.emplace_back("No release notes were provided.");
+  return lines;
+}
+
+static void requestLauncherExitAfterUpdate() {
+  g_exitRequested=true;
+}
+
+static void runUpdateScreen() {
+  if(!g_griddbReady){
+    modalMessage("Update check unavailable",{
+      "The launcher could not initialize its network connection.",
+      "Check the connection and try again."
+    });
+    return;
+  }
+  LauncherUpdateSnapshot initial=LauncherUpdate_GetSnapshot();
+  if(initial.state==LauncherUpdateState::Idle)
+    LauncherUpdate_StartCheck(installedReleaseTag());
+
+  int scroll=0;
+  bool cancelRequested=false,installedSaved=false;
+  std::string wrappedTag,wrappedBody;
+  std::vector<std::string> wrappedLines;
+  beginScreenFx();
+  for(;;){
+    if(!beginUiFrame()){
+      LauncherUpdate_Cancel();
+      return;
+    }
+    LauncherUpdateSnapshot snapshot=LauncherUpdate_GetSnapshot();
+    if(snapshot.state==LauncherUpdateState::ReadyToInstall){
+      if(g_romfsReady){ romfsExit(); g_romfsReady=false; }
+      LauncherUpdate_InstallDownloaded(g_launcherNroPath);
+      snapshot=LauncherUpdate_GetSnapshot();
+      if(snapshot.state==LauncherUpdateState::Error&&!g_romfsReady&&R_SUCCEEDED(romfsInit()))
+        g_romfsReady=true;
+    }
+    if(snapshot.state==LauncherUpdateState::Installed&&!installedSaved){
+      storeSet(g_global,"Wrapper/InstalledReleaseTag",snapshot.release.tag.c_str());
+      storeSave(g_global,LAUNCHER_INI);
+      g_updateNoticeTag.clear();
+      installedSaved=true;
+    }
+
+    const int panelWidth=SW*7/8,panelHeight=SH*4/5;
+    const int panelX=(SW-panelWidth)/2,panelY=(SH-panelHeight)/2;
+    const int bodyX=panelX+42,bodyY=panelY+126,bodyWidth=panelWidth-84;
+    const int footerHeight=108,bodyBottom=panelY+panelHeight-footerHeight;
+    const int lineHeight=TTF_FontHeight(g_font_sm)+8;
+    const int visibleLines=std::max(1,(bodyBottom-bodyY)/lineHeight);
+    if(snapshot.release.tag!=wrappedTag||snapshot.release.notes!=wrappedBody){
+      wrappedTag=snapshot.release.tag;
+      wrappedBody=snapshot.release.notes;
+      wrappedLines=wrapReleaseNotes(wrappedBody.empty()?"Release notes will appear here.":wrappedBody,bodyWidth-20);
+      scroll=0;
+    }
+    const int maxScroll=std::max(0,(int)wrappedLines.size()-visibleLines);
+    scroll=std::max(0,std::min(scroll,maxScroll));
+
+    SDL_Event event;
+    navRepeat();
+    while(pollUiEvent(event)){
+      pumpStick(event);
+      int tx=0,ty=0; TouchKind touch=touchFeed(event,&tx,&ty);
+      if(touch==TOUCH_SCROLL_UP) scroll=std::min(maxScroll,scroll+std::max(1,g_touchScrollSteps));
+      else if(touch==TOUCH_SCROLL_DOWN) scroll=std::max(0,scroll-std::max(1,g_touchScrollSteps));
+      if(event.type!=SDL_CONTROLLERBUTTONDOWN) continue;
+      if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_UP) scroll=std::max(0,scroll-1);
+      else if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_DOWN) scroll=std::min(maxScroll,scroll+1);
+      else if(event.cbutton.button==SDL_CONTROLLER_BUTTON_LEFTSHOULDER) scroll=std::max(0,scroll-visibleLines);
+      else if(event.cbutton.button==SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) scroll=std::min(maxScroll,scroll+visibleLines);
+      else if(event.cbutton.button==BTN_CANCEL){
+        if(snapshot.state==LauncherUpdateState::Downloading){ LauncherUpdate_Cancel(); cancelRequested=true; }
+        else if(snapshot.state!=LauncherUpdateState::Installed) return;
+      } else if(event.cbutton.button==BTN_CONFIRM){
+        if(snapshot.state==LauncherUpdateState::UpdateAvailable){
+          if(LauncherUpdate_StartDownload(g_launcherNroPath)) cancelRequested=false;
+        } else if(snapshot.state==LauncherUpdateState::Error||snapshot.state==LauncherUpdateState::Cancelled){
+          cancelRequested=false;
+          LauncherUpdate_StartCheck(installedReleaseTag());
+        } else if(snapshot.state==LauncherUpdateState::Installed){
+          requestLauncherExitAfterUpdate();
+          return;
+        }
+      }
+    }
+
+    snapshot=LauncherUpdate_GetSnapshot();
+    clearUiBackground();
+    fillRect(0,0,SW,SH,(SDL_Color){0,0,0,105});
+    glassPanel(panelX,panelY,panelWidth,panelHeight);
+    border(panelX,panelY,panelWidth,panelHeight,3,COL_SEL);
+    drawTextC(g_font_big,SW/2,panelY+24,"Cemu Update",COL_SEL);
+
+    std::string status;
+    switch(snapshot.state){
+      case LauncherUpdateState::Idle: status="Ready to check for updates"; break;
+      case LauncherUpdateState::Checking: status="Checking GitHub for the latest release..."; break;
+      case LauncherUpdateState::UpdateAvailable:
+        status="Version "+snapshot.release.tag+" is available    Installed: "+installedReleaseTag(); break;
+      case LauncherUpdateState::UpToDate:
+        status="You are up to date    Installed: "+installedReleaseTag(); break;
+      case LauncherUpdateState::Downloading:
+        status=cancelRequested?"Cancelling download...":"Downloading "+snapshot.release.assetName; break;
+      case LauncherUpdateState::ReadyToInstall: status="Preparing installation..."; break;
+      case LauncherUpdateState::Installing: status="Installing update..."; break;
+      case LauncherUpdateState::Installed: status="Update installed successfully - relaunch Cemu manually"; break;
+      case LauncherUpdateState::Cancelled: status="Update cancelled"; break;
+      case LauncherUpdateState::Error: status=snapshot.error.empty()?"Update failed":snapshot.error; break;
+    }
+    drawScrollTextL(g_font_sm,bodyX,panelY+92,bodyWidth,status.c_str(),
+      snapshot.state==LauncherUpdateState::Error?(SDL_Color){235,125,115,255}:COL_VAL);
+
+    SDL_Rect clip={bodyX,bodyY,bodyWidth,bodyBottom-bodyY};
+    SDL_RenderSetClipRect(g_ren,&clip);
+    for(int row=0;row<visibleLines&&scroll+row<(int)wrappedLines.size();row++)
+      drawText(g_font_sm,bodyX,bodyY+row*lineHeight,wrappedLines[scroll+row].c_str(),COL_TXT);
+    SDL_RenderSetClipRect(g_ren,nullptr);
+    if((int)wrappedLines.size()>visibleLines){
+      const int trackX=panelX+panelWidth-25,trackHeight=bodyBottom-bodyY;
+      fillRect(trackX,bodyY,4,trackHeight,(SDL_Color){40,44,54,255});
+      const int thumbHeight=std::max(18,trackHeight*visibleLines/(int)wrappedLines.size());
+      fillRect(trackX,bodyY+(trackHeight-thumbHeight)*scroll/std::max(1,maxScroll),4,thumbHeight,COL_SEL);
+    }
+
+    if(snapshot.state==LauncherUpdateState::Downloading){
+      const uint64_t total=snapshot.total?snapshot.total:snapshot.release.assetSize;
+      const int percent=total?(int)std::min<uint64_t>(100,snapshot.downloaded*100/total):0;
+      const int barX=bodyX,barY=panelY+panelHeight-82,barWidth=bodyWidth,barHeight=24;
+      border(barX,barY,barWidth,barHeight,2,COL_SEL);
+      fillRect(barX+3,barY+3,(barWidth-6)*percent/100,barHeight-6,COL_HI);
+      char progress[96];
+      snprintf(progress,sizeof(progress),"%d%%    %.1f / %.1f MiB",percent,
+        snapshot.downloaded/(1024.0*1024.0),total/(1024.0*1024.0));
+      drawTextC(g_font_sm,SW/2,barY+30,progress,COL_DIM);
+    } else {
+      const char *controls="B  Back       Up / Down  Scroll       L / R  Page";
+      if(snapshot.state==LauncherUpdateState::UpdateAvailable) controls="A  Download       B  Back       Up / Down  Scroll";
+      else if(snapshot.state==LauncherUpdateState::Error||snapshot.state==LauncherUpdateState::Cancelled) controls="A  Retry       B  Back";
+      else if(snapshot.state==LauncherUpdateState::Installed) controls="A  Exit Cemu";
+      drawTextC(g_font_sm,SW/2,panelY+panelHeight-50,controls,COL_DIM);
+    }
+    drawFadeIn();
+    SDL_RenderPresent(g_ren);
+    SDL_Delay(8);
+  }
+}
+
+static void pollUpdateNotification() {
+  const LauncherUpdateSnapshot snapshot=LauncherUpdate_GetSnapshot();
+  if(snapshot.state==LauncherUpdateState::UpdateAvailable&&!snapshot.release.tag.empty()&&
+     snapshot.release.tag!=g_updateNotifiedTag){
+    g_updateNotifiedTag=snapshot.release.tag;
+    g_updateNoticeTag=snapshot.release.tag;
+    g_updateNoticeUntil=SDL_GetTicks()+9000;
+  }
+}
+
+static void drawUpdateNotification() {
+  if(g_updateNoticeTag.empty()||SDL_TICKS_PASSED(SDL_GetTicks(),g_updateNoticeUntil)){
+    g_updateNoticeTag.clear();
+    return;
+  }
+  const int width=std::min(540,SW-40),height=92,x=SW-width-24,y=SH-height-58;
+  glassPanel(x,y,width,height);
+  border(x,y,width,height,2,COL_SEL);
+  const std::string title="Cemu "+g_updateNoticeTag+" is available";
+  drawText(g_font,x+22,y+16,ellipsizedText(g_font,title,width-44).c_str(),COL_VAL);
+  drawText(g_font_sm,x+22,y+54,"Open Settings > Launcher > Check for Updates",COL_TXT);
 }
 
 static const char *gridDbErrorText(int result) {
@@ -3866,6 +4293,17 @@ static std::string gfxCatDefault(const GfxPack &p, const GfxCat &c) {
   return c.presetIdx.empty() ? "" : p.presets[c.presetIdx[0]].name;
 }
 
+static int downloadLatestGraphicPacks() {
+  toast("Downloading latest graphic packs...");
+  appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
+  const int result=gfxpacks_downloadLatest(GRAPHICPACKS_DIR);
+  appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+  toast(result==GFX_OK?"Packs updated":result==GFX_UPTODATE?"Already up to date":
+        result==GFX_NET_FAIL?"Download failed (network)":"Extract failed");
+  SDL_Delay(1300);
+  return result;
+}
+
 static void openPackPanel(const GfxPack &p, PackSel &s) {
   auto cats = gfxGroupPresets(p);
   auto choiceRef = [&](const std::string &cat) -> std::string & {
@@ -4029,13 +4467,9 @@ static void gfxPackScreen(uint64_t filterTitleId) {
       } else if (b == BTN_CONFIRM) {
         if (mode == 0) {
           if (sel == 0) {
-            toast("Downloading latest graphic packs...");
-            appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
-            int r = gfxpacks_downloadLatest(GRAPHICPACKS_DIR);
-            appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+            downloadLatestGraphicPacks();
             load(packs); buildGames(games); sel = top = 0;
-            toast(r == GFX_OK ? "Packs updated" : r == GFX_UPTODATE ? "Already up to date" : r == GFX_NET_FAIL ? "Download failed (network)" : "Extract failed");
-            SDL_Delay(1300); beginScreenFx();
+            beginScreenFx();
           } else if (sel - 1 < (int)games.size()) {
             gameSel = sel;
             rows = gfxBuildGameRows(packs, games[sel - 1], false); mode = 1; sel = nextSelectable(0, +1); top = 0; beginScreenFx();
@@ -4326,6 +4760,8 @@ static int perGameMenu(Game &g) {
   constexpr int menuY = 184, menuStep = 52, menuHeight = 46;
   int n=10, sel=0, touchTop=0;
   std::string gp = std::string(GAMECFG_DIR) + "/" + g.key + ".ini";
+  const std::string downloadedPacksVersion=std::string(GRAPHICPACKS_DIR)+"/downloadedGraphicPacks/version.txt";
+  bool graphicPacksDownloaded=regularFileExists(downloadedPacksVersion);
   storeLoad(g_game, gp.c_str());
   beginScreenFx();
   for(;;){
@@ -4360,7 +4796,12 @@ static int perGameMenu(Game &g) {
             beginScreenFx();
           }
           else if(sel==2){
-            if (g.titleId) gfxPackScreen(g.titleId);
+            if(!graphicPacksDownloaded){
+              const int result=downloadLatestGraphicPacks();
+              if(result==GFX_OK||result==GFX_UPTODATE)
+                graphicPacksDownloaded=regularFileExists(downloadedPacksVersion);
+            }
+            else if (g.titleId) gfxPackScreen(g.titleId);
             else showTitleIdUnavailable("Graphics packs unavailable",g);
             beginScreenFx();
           }
@@ -4441,8 +4882,9 @@ static int perGameMenu(Game &g) {
     fillRect(mx,(int)g_hy,mw,menuHeight,COL_FOCUS);
     fillRect(mx,(int)g_hy,5,menuHeight,COL_SEL);
     for(int i=0;i<n;i++){ int slot=menuY+i*menuStep-5; int y=slot+(menuHeight-TTF_FontHeight(g_font))/2; bool cur=i==sel;
-      SDL_Color rc = (i==n-1) ? (SDL_Color){228,120,120,255} : COL_TXT;
-      drawText(g_font,cx+cw+94,y,items[i],cur?COL_VAL:rc);
+      SDL_Color rc = (i==n-1) ? (SDL_Color){228,120,120,255} : i==2&&!graphicPacksDownloaded ? COL_HI : COL_TXT;
+      const char *label=i==2&&!graphicPacksDownloaded?"Download graphics packs":items[i];
+      drawText(g_font,cx+cw+94,y,label,cur?COL_VAL:rc);
     }
     drawFadeIn();
     SDL_RenderPresent(g_ren);
@@ -4569,7 +5011,7 @@ static bool ensureEmu() {
       if(!beginUiFrame()){ ok=false; break; }
       SDL_Event event; while(pollUiEvent(event)) {}
       if(g_exitRequested){ ok=false; break; }
-      drawSetupProgress(pct, "Installing emulator update..."); lastPct = pct;
+      drawSetupProgress(pct, "Updating..."); lastPct = pct;
     }
   }
   if (ferror(in)) ok = false;
@@ -4721,6 +5163,7 @@ static void renderGrid(int sel,int top,const char*gamedirLabel){
     if(g_showGameTitles) drawTitleCell(x+L.cw/2,L.cw,y+L.chh+6,g.title,cur,cur?COL_VAL:COL_DIM);
   }
   if(n==0) drawTextC(g_font,SW/2,SH/2,"No games found -- press X for Settings > Game folder",COL_DIM);
+  drawUpdateNotification();
   FootItem foot[] = {
     { g_gA, "Launch", FA_LAUNCH }, { g_gY, "Sort", FA_SORT },
     { g_gX, "Settings", FA_SETTINGS }, { g_gPlus, "Game Menu", FA_OPTIONS },
@@ -4771,6 +5214,7 @@ static bool ensureDirectory(const char *path) {
 }
 
 static void cleanupLauncher() {
+  LauncherUpdate_Shutdown();
   for (auto &game : g_games) {
     if (game.cover) SDL_DestroyTexture(game.cover);
     game.cover = nullptr;
@@ -4825,7 +5269,12 @@ static int startupFailure(const char *message) {
 }
 
 int main(int argc, char **argv){
-  if(argc>=1 && argv[0] && argv[0][0]) g_forwarderSelfPath=argv[0];
+  if(argc>=1 && argv[0] && argv[0][0]){
+    g_forwarderSelfPath=argv[0];
+    setLauncherPathFromArg(argv[0]);
+  }
+  std::string updateRecoveryError;
+  const bool updateRecoveryOk=LauncherUpdate_RecoverInstallation(g_launcherNroPath,updateRecoveryError);
   if (R_FAILED(romfsInit())) return 1;
   g_romfsReady = true;
   detectSystemLanguage();
@@ -4866,16 +5315,19 @@ int main(int argc, char **argv){
   g_font_big=openFont(sc?52:40);
   if(!g_font_sm || !g_font || !g_font_big) return startupFailure("Could not open the system font.");
   makeGlyphs();
-
   g_griddbReady = griddb_global_init();
   if(!g_griddbReady && R_SUCCEEDED(socketInitializeDefault())) g_storageSocketReady=true;
 
   const char *directories[] = {
-    "sdmc:/switch", DATA_DIR, COVERS_DIR, GAMECFG_DIR, DEF_GAMEDIR,
-    GAMEPROFILES_DIR, GRAPHICPACKS_DIR, "sdmc:/switch/Cemu/install", "sdmc:/switch/Cemu/mlc01"
+    "sdmc:/switch", DATA_DIR, EMU_HOST_DIR, COVERS_DIR, GAMECFG_DIR, DEF_GAMEDIR,
+    GAMEPROFILES_DIR, GRAPHICPACKS_DIR, LSFG_DIR, "sdmc:/switch/cemu/cache",
+    "sdmc:/switch/cemu/install", "sdmc:/switch/cemu/mlc01"
   };
   for (const char *directory : directories)
     if (!ensureDirectory(directory)) return startupFailure("Could not create the Cemu data directories.");
+
+  if(!updateRecoveryOk)
+    modalMessage("Update recovery failed",{updateRecoveryError,"The installed launcher was left unchanged."});
 
   if(!ensureEmu())
     modalMessage("Emulator setup failed", {
@@ -4902,6 +5354,8 @@ int main(int argc, char **argv){
     storeSet(g_global, "Wrapper/GridRows", "2");
     storeSet(g_global, "Wrapper/ShowGameTitles", "true");
     storeSet(g_global, "Wrapper/UiAnimations", "true");
+    storeSet(g_global, "Wrapper/CheckUpdatesAtBoot", "true");
+    storeSet(g_global, "Wrapper/InstalledReleaseTag", LauncherUpdate_BuiltReleaseTag());
     commitAll();
     storeSave(g_global, LAUNCHER_INI);
   } else {
@@ -4922,12 +5376,12 @@ int main(int argc, char **argv){
   const uint64_t startupUsbGeneration=SwitchStorage::UsbStatusGeneration();
   if(startupUsbGeneration!=usbGeneration){ usbGeneration=startupUsbGeneration; usbRefreshAt=SDL_GetTicks()+300; }
 
-  if (!cemu_hasConfiguredDiscKey("sdmc:/switch/Cemu/keys.txt"))
+  if (!cemu_hasConfiguredDiscKey("sdmc:/switch/cemu/keys.txt"))
     modalMessage("Disc key required", {
       "Cemu/keys.txt does not contain a Wii U disc key.",
       "WUX games cannot be decrypted until a valid key is added.",
       "",
-      "Add the key to sdmc:/switch/Cemu/keys.txt." });
+      "Add the key to sdmc:/switch/cemu/keys.txt." });
 
   int sel=0, top=0, rows=1;
   bool running=true, launch=false;
@@ -4952,6 +5406,9 @@ int main(int argc, char **argv){
     if (Game *game = findGameByKey(forwarderKey)){ selectGame(*game); forwarderMatched=true; }
     break;
   }
+  if(!forwarderRequested&&g_griddbReady&&
+     strcmp(storeGet(g_global,"Wrapper/CheckUpdatesAtBoot","true"),"false")!=0)
+    LauncherUpdate_StartCheck(installedReleaseTag());
   bool forwarderPending=forwarderRequested&&!forwarderMatched&&hasUsbSource;
   const Uint32 forwarderDeadline=forwarderPending?SDL_GetTicks()+6000:0;
   if(forwarderPending&&!usbRefreshAt) usbRefreshAt=SDL_GetTicks()+300;
@@ -5082,6 +5539,7 @@ int main(int argc, char **argv){
       }
       top = n ? (sel/(cols*rows))*rows : 0;
     }
+    pollUpdateNotification();
     const std::string location=!g_games.empty()?gameLocationLabel(g_games[sel]):"No game selected";
     renderGrid(sel,top,location.c_str());
     SDL_Delay(8);
@@ -5109,15 +5567,30 @@ int main(int argc, char **argv){
     }
     if (configOk) {
       std::string handoff;
+      bool lsfgPrepared = !strcmp(cemuKVGet(eff,"Wrapper/LSFGEnabled","false"),"true");
+      if (lsfgPrepared && !regularFileExists(LSFG_DLL_FILE)) {
+        lsfgPrepared = false;
+        modalMessage("LSFG disabled for this launch", {
+          "Lossless.dll was not found at",
+          "sdmc:/switch/cemu/lsfg/Lossless.dll"
+        });
+      }
       configOk = appendHandoffValue(handoff, "timer_shift", cemuKVGet(eff,"TimerShiftFactor","3")) &&
                  appendHandoffValue(handoff, "triple_buffer", cemuKVGet(eff,"TripleBuffer","1")) &&
-                 appendHandoffValue(handoff, "cpu_mode", cemuKVGet(eff,"cpuMode","3"));
+                 appendHandoffValue(handoff, "cpu_mode", cemuKVGet(eff,"cpuMode","3")) &&
+                 appendHandoffValue(handoff, "gamepad_layout", cemuKVGet(eff,"GamePadLayout","off")) &&
+                 appendHandoffValue(handoff, "lsfg_enabled", lsfgPrepared ? "true" : "false") &&
+                 appendHandoffValue(handoff, "lsfg_flow_scale", cemuKVGet(eff,"Wrapper/LSFGFlowScale","0.25")) &&
+                 appendHandoffValue(handoff, "lsfg_performance", cemuKVGet(eff,"Wrapper/LSFGPerformance","true")) &&
+                 appendHandoffValue(handoff, "usb_skylanders", cemuKVGet(eff,"UsbSkylanders","false")) &&
+                 appendHandoffValue(handoff, "usb_infinity", cemuKVGet(eff,"UsbInfinity","false")) &&
+                 appendHandoffValue(handoff, "usb_dimensions", cemuKVGet(eff,"UsbDimensions","false"));
       char gameId[32]{};
-      if (configOk && launchTitleId) {
+      if (configOk && !launchPath.empty()) {
+        configOk = appendHandoffValue(handoff, "game", launchPath);
+      } else if (configOk && launchTitleId) {
         snprintf(gameId, sizeof(gameId), "id:%016llx", (unsigned long long)launchTitleId);
         configOk = appendHandoffValue(handoff, "game", gameId);
-      } else if (configOk && !launchPath.empty()) {
-        configOk = appendHandoffValue(handoff, "game", launchPath);
       }
       if (configOk) configOk = writeAtomicText(LAUNCH_HANDOFF, handoff);
     }
@@ -5126,7 +5599,7 @@ int main(int argc, char **argv){
     else {
       remove(LAUNCH_HANDOFF);
       if (!haveEmu) {
-        toast("Emulator missing - copy Cemu.nro into sdmc:/switch/Cemu/"); SDL_Delay(2400);
+        toast("Emulator missing - copy cemu.nro into sdmc:/switch/cemu/"); SDL_Delay(2400);
       } else {
         modalMessage("Launch configuration failed", {
           "Cemu configuration could not be updated safely.",
@@ -5139,6 +5612,6 @@ int main(int argc, char **argv){
 
   cleanupLauncher();
 
-  if(willChain) envSetNextLoad(EMU_NRO_DST, EMU_NRO_DST);
+  if(willChain) envSetNextLoad(EMU_NRO_DST,EMU_NRO_DST);
   return 0;
 }
