@@ -13,7 +13,7 @@
 #include "Cafe/HW/Latte/Core/LatteTiming.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Renderer/RendererOuputShader.h"
-#include <cinttypes>
+#include <charconv>
 
 std::vector<GraphicPackPtr> GraphicPack2::s_graphic_packs;
 std::vector<GraphicPackPtr> GraphicPack2::s_active_graphic_packs;
@@ -737,6 +737,42 @@ bool GraphicPack2::SetActivePreset(std::string_view category, std::string_view n
 	return result;
 }
 
+static bool ParseGraphicPackShaderFilename(std::string_view filename, uint64& shaderBaseHash, uint64& shaderAuxHash,
+	GraphicPack2::GP_SHADER_TYPE& shaderType, bool& isMetalShader)
+{
+	// Shader pack filenames are ASCII. Keep parsing on the narrow path so it also works on runtimes
+	// where filesystem wide-string conversion or wide formatted input is incomplete.
+	const size_t firstSeparator = filename.find('_');
+	const size_t secondSeparator = firstSeparator == std::string::npos ? std::string::npos : filename.find('_', firstSeparator + 1);
+	if (firstSeparator == std::string::npos || secondSeparator == std::string::npos || firstSeparator == 0 ||
+		secondSeparator == firstSeparator + 1 || firstSeparator > 16 || secondSeparator - firstSeparator - 1 > 16)
+		return false;
+
+	auto parseHash = [](std::string_view text, uint64& hash)
+	{
+		const auto result = std::from_chars(text.data(), text.data() + text.size(), hash, 16);
+		return result.ec == std::errc{} && result.ptr == text.data() + text.size();
+	};
+
+	if (!parseHash(filename.substr(0, firstSeparator), shaderBaseHash) ||
+		!parseHash(filename.substr(firstSeparator + 1, secondSeparator - firstSeparator - 1), shaderAuxHash))
+		return false;
+
+	const std::string_view suffix = filename.substr(secondSeparator + 1);
+	isMetalShader = suffix.ends_with("_msl.txt");
+	const std::string_view typeSuffix = isMetalShader ? suffix.substr(0, suffix.size() - 8) :
+		(suffix.ends_with(".txt") ? suffix.substr(0, suffix.size() - 4) : std::string_view{});
+	if (typeSuffix == "ps")
+		shaderType = GraphicPack2::GP_SHADER_TYPE::PIXEL;
+	else if (typeSuffix == "vs")
+		shaderType = GraphicPack2::GP_SHADER_TYPE::VERTEX;
+	else if (typeSuffix == "gs")
+		shaderType = GraphicPack2::GP_SHADER_TYPE::GEOMETRY;
+	else
+		return false;
+	return true;
+}
+
 void GraphicPack2::LoadShaders()
 {
 	fs::path path = GetRulesPath();
@@ -748,22 +784,16 @@ void GraphicPack2::LoadShaders()
 		try
 		{
 			const auto& p = it.path();
-			auto filename = p.filename().wstring();
+			const std::string filename = _pathToUtf8(p.filename());
 			uint64 shader_base_hash = 0;
 			uint64 shader_aux_hash = 0;
-			wchar_t shader_type[256]{};
-			if (filename.size() < 256 && swscanf(filename.c_str(), L"%" SCNx64 "_%" SCNx64 "_%ls", &shader_base_hash, &shader_aux_hash, shader_type) == 3)
+			GP_SHADER_TYPE shader_type{};
+			bool isMetalShader = false;
+			if (ParseGraphicPackShaderFilename(filename, shader_base_hash, shader_aux_hash, shader_type, isMetalShader))
 			{
-			    bool isMetalShader = (shader_type[2] == '_' && shader_type[3] == 'm' && shader_type[4] == 's' && shader_type[5] == 'l');
-
-				if (shader_type[0] == 'p' && shader_type[1] == 's')
-					m_custom_shaders.emplace_back(LoadShader(p, shader_base_hash, shader_aux_hash, GP_SHADER_TYPE::PIXEL, isMetalShader));
-				else if (shader_type[0] == 'v' && shader_type[1] == 's')
-					m_custom_shaders.emplace_back(LoadShader(p, shader_base_hash, shader_aux_hash, GP_SHADER_TYPE::VERTEX, isMetalShader));
-				else if (shader_type[0] == 'g' && shader_type[1] == 's')
-					m_custom_shaders.emplace_back(LoadShader(p, shader_base_hash, shader_aux_hash, GP_SHADER_TYPE::GEOMETRY, isMetalShader));
+				m_custom_shaders.emplace_back(LoadShader(p, shader_base_hash, shader_aux_hash, shader_type, isMetalShader));
 			}
-			else if (filename == L"output.glsl")
+			else if (filename == "output.glsl")
 			{
 				std::ifstream file(p);
 				if (!file.is_open())
@@ -776,7 +806,7 @@ void GraphicPack2::LoadShaders()
 				m_output_shader_source.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 				ApplyShaderPresets(m_output_shader_source);
 			}
-			else if (filename == L"upscaling.glsl")
+			else if (filename == "upscaling.glsl")
 			{
 				std::ifstream file(p);
 				if (!file.is_open())
@@ -789,7 +819,7 @@ void GraphicPack2::LoadShaders()
 				m_upscaling_shader_source.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 				ApplyShaderPresets(m_upscaling_shader_source);
 			}
-			else if (filename == L"downscaling.glsl")
+			else if (filename == "downscaling.glsl")
 			{
 				std::ifstream file(p);
 				if (!file.is_open())

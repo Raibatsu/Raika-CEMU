@@ -1058,6 +1058,80 @@ static int footTapAct(int px,int py){
   return FA_NONE;
 }
 
+static SDL_Texture *glyphForButton(const char *button){
+  if(!button) return nullptr;
+  if(strcmp(button,"A")==0) return g_gA;
+  if(strcmp(button,"B")==0) return g_gB;
+  if(strcmp(button,"X")==0) return g_gX;
+  if(strcmp(button,"Y")==0) return g_gY;
+  if(strcmp(button,"+")==0) return g_gPlus;
+  if(strcmp(button,"L")==0) return g_gL;
+  if(strcmp(button,"R")==0) return g_gR;
+  return nullptr;
+}
+
+static void buttonHintSize(const char *button,int &width,int &height){
+  SDL_Texture *glyph=glyphForButton(button);
+  width=height=0;
+  if(glyph){
+    SDL_QueryTexture(glyph,nullptr,nullptr,&width,&height);
+    width/=GLYPH_SS; height/=GLYPH_SS;
+  } else {
+    width=textW(g_font_sm,button?button:"")+14;
+    height=TTF_FontHeight(g_font_sm)+6;
+  }
+}
+
+static int drawButtonHint(int x,int cy,const char *button,const char *label){
+  int width=0,height=0; buttonHintSize(button,width,height);
+  SDL_Texture *glyph=glyphForButton(button);
+  if(glyph){
+    SDL_Rect destination={x,cy-height/2,width,height};
+    SDL_RenderCopy(g_ren,glyph,nullptr,&destination);
+  } else {
+    border(x,cy-height/2,width,height,1,COL_DIM);
+    drawTextC(g_font_sm,x+width/2,cy-TTF_FontHeight(g_font_sm)/2,button?button:"",COL_TXT);
+  }
+  if(label&&label[0])
+    drawText(g_font_sm,x+width+8,cy-TTF_FontHeight(g_font_sm)/2,label,COL_DIM);
+  return width+((label&&label[0])?8+textW(g_font_sm,label):0);
+}
+
+static void drawSettingsFooter(const char *text,int centerY=-1){
+  if(!text||!text[0]) return;
+  std::vector<std::string> tokens;
+  const size_t length=strlen(text);
+  size_t cursor=0;
+  while(cursor<length){
+    while(cursor<length&&text[cursor]==' ') cursor++;
+    if(cursor>=length) break;
+    const size_t start=cursor;
+    while(cursor<length){
+      if(cursor+1<length&&text[cursor]==' '&&text[cursor+1]==' ') break;
+      cursor++;
+    }
+    tokens.emplace_back(trim(std::string(text+start,cursor-start)));
+    while(cursor<length&&text[cursor]==' ') cursor++;
+  }
+  const int cy=centerY>=0?centerY:SH-26;
+  if(tokens.size()<2||(tokens.size()&1)){
+    drawTextC(g_font_sm,SW/2,cy-TTF_FontHeight(g_font_sm)/2,text,COL_DIM);
+    return;
+  }
+  const int pairGap=26;
+  int total=0;
+  for(size_t i=0;i<tokens.size();i+=2){
+    int width=0,height=0; buttonHintSize(tokens[i].c_str(),width,height);
+    total+=width+8+textW(g_font_sm,tokens[i+1].c_str());
+    if(i+2<tokens.size()) total+=pairGap;
+  }
+  int x=(SW-total)/2;
+  for(size_t i=0;i<tokens.size();i+=2){
+    x+=drawButtonHint(x,cy,tokens[i].c_str(),tokens[i+1].c_str());
+    if(i+2<tokens.size()) x+=pairGap;
+  }
+}
+
 enum TouchKind { TOUCH_NONE, TOUCH_TAP, TOUCH_SWIPE_L, TOUCH_SWIPE_R, TOUCH_SCROLL_UP, TOUCH_SCROLL_DOWN };
 struct TouchG {
   bool active=false, vertical=false;
@@ -1840,7 +1914,10 @@ static bool transferFrame(TransferState &state) {
   int percent=state.total?(int)(progress*100/state.total):0;
   snprintf(text,sizeof(text),"%d%%  -  %.1f / %.1f MiB",percent,done/1048576.0,state.total/1048576.0);
   drawTextC(g_font,SW/2,by+66,text,COL_TXT);
-  drawTextC(g_font_sm,SW/2,SH-72,state.cancelled.load()?"Cancelling...":"B  Cancel",state.cancelled.load()?COL_VAL:COL_DIM);
+  if(state.cancelled.load())
+    drawTextC(g_font_sm,SW/2,SH-72,"Cancelling...",COL_VAL);
+  else
+    drawSettingsFooter("B  Cancel",SH-60);
   SDL_RenderPresent(g_ren);
   return !state.cancelled.load();
 }
@@ -2143,8 +2220,8 @@ static bool editSmbShare(SwitchStorage::SmbShare &share,bool creating) {
     std::string address="smb://"+(edited.server.empty()?std::string("server"):edited.server)+"/"+(edited.share.empty()?std::string("share"):sharedFolder());
     drawText(g_font_sm,helpX+28,y0+210,"Connection preview",COL_DIM);
     drawScrollTextL(g_font,helpX+28,y0+244,helpWidth-56,address.c_str(),COL_VAL);
-    drawText(g_font_sm,helpX+28,y0+panelHeight-78,"A  Edit / toggle",COL_DIM);
-    drawText(g_font_sm,helpX+28,y0+panelHeight-44,"B  Cancel",COL_DIM);
+    drawButtonHint(helpX+28,y0+panelHeight-66,"A","Edit / toggle");
+    drawButtonHint(helpX+28,y0+panelHeight-32,"B","Cancel");
     drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
   return saved;
@@ -2223,7 +2300,7 @@ static void networkSharesScreen() {
           std::string address="smb://"+share.server+"/"+share.share+(share.path.empty()?std::string{}:"/"+share.path);
           drawText(g_font_sm,82,y+31,ellipsizedText(g_font_sm,address,SW-340).c_str(),COL_DIM); }
       }
-      drawTextC(g_font_sm,SW/2,SH-38,"A  Select       B  Back",COL_DIM);
+      drawSettingsFooter("A  Select       B  Back");
       SDL_RenderPresent(g_ren); SDL_Delay(8);
     }
   }
@@ -2296,7 +2373,8 @@ static void renderUsbForwarderWait() {
   border(panelX,panelY,panelWidth,panelHeight,3,COL_SEL);
   drawTextC(g_font_big,SW/2,panelY+42,"Connecting USB storage",COL_SEL);
   drawTextC(g_font,SW/2,panelY+108,"Waiting for the game drive...",COL_TXT);
-  drawTextC(g_font_sm,SW/2,panelY+164,"The game will start automatically    B  Cancel",COL_DIM);
+  drawTextC(g_font_sm,SW/2,panelY+150,"The game will start automatically",COL_DIM);
+  drawSettingsFooter("B  Cancel",panelY+190);
   SDL_RenderPresent(g_ren);
 }
 
@@ -2455,7 +2533,7 @@ static std::string runFileBrowser(const std::string &start,BrowserMode mode) {
         drawText(g_font,80,y,ellipsizedText(g_font,item.label,SW-180).c_str(),selected?COL_VAL:color);
       }
       std::string footer=mode==BrowserMode::Manage?"A  Open       X  Actions       Y  Paste       B  Back":"A  Open / Select       X  Pin       B  Back";
-      drawTextC(g_font_sm,SW/2,SH-38,footer.c_str(),COL_DIM);
+      drawSettingsFooter(footer.c_str());
       SDL_RenderPresent(g_ren); SDL_Delay(8);
     }
   }
@@ -2853,7 +2931,7 @@ static void runInputMappingScreen() {
       const int denominator=std::max(1,count-visible);
       fillRect(trackX,trackY+(trackHeight-thumbHeight)*top/denominator,4,thumbHeight,COL_SEL);
     }
-    drawTextC(g_font_sm,SW/2,SH-38,"A  Assign       B  Back",COL_DIM);
+    drawSettingsFooter("A  Assign       B  Back");
     drawFadeIn();
     SDL_RenderPresent(g_ren);
     SDL_Delay(8);
@@ -2946,17 +3024,35 @@ static std::string launcherUpdateStatusText() {
   return std::string("Installed ")+installedReleaseTag();
 }
 
+static std::string steamGridDbKey(){
+  return trim(storeGet(g_global,"Wrapper/SteamGridDBKey",""));
+}
+
+static bool promptAndSaveSteamGridDbKey(const char *header,bool allowEmpty){
+  const std::string current=steamGridDbKey();
+  char value[256];
+  if(!promptTextMode(header,current.c_str(),value,sizeof(value),true,allowEmpty,
+                     "Used for cover and shortcut artwork downloads.",
+                     allowEmpty?"Leave blank to remove the saved key":"Enter a valid key to continue"))
+    return false;
+  const std::string normalized=trim(value);
+  if(!allowEmpty&&normalized.empty()) return false;
+  storeSet(g_global,"Wrapper/SteamGridDBKey",normalized.c_str());
+  storeSave(g_global,LAUNCHER_INI);
+  return true;
+}
+
 static void launcherSettingsScreen() {
-  static int savedSelection=0;
+  static int savedSelection=0,savedTop=0;
   const int optionCount=(int)(sizeof(S_launcher)/sizeof(Opt));
-  const int coversRow=optionCount,listCount=optionCount+1;
+  const int apiKeyRow=optionCount,coversRow=optionCount+1,listCount=optionCount+2;
   const int updateRow=listCount,selectionCount=listCount+1;
-  int sel=std::max(0,std::min(savedSelection,selectionCount-1)),top=0;
+  int sel=std::max(0,std::min(savedSelection,selectionCount-1)),top=std::max(0,savedTop);
   auto applyChange=[&](){
     applyLauncherAppearance();
     uiAudioSetEnabled(strcmp(storeGet(g_global,"Wrapper/UiSounds","true"),"false")!=0);
   };
-  auto finish=[&](){ savedSelection=sel; storeSave(g_global,LAUNCHER_INI); };
+  auto finish=[&](){ savedSelection=sel; savedTop=top; storeSave(g_global,LAUNCHER_INI); };
   beginScreenFx();
   for(;;){
     if(!beginUiFrame()){ finish(); return; }
@@ -2995,6 +3091,13 @@ static void launcherSettingsScreen() {
       else if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_RIGHT&&sel<optionCount){ optAdjust(S_launcher[sel],1); applyChange(); }
       else if(event.cbutton.button==BTN_CONFIRM){
         if(sel==updateRow){ runUpdateScreen(); beginScreenFx(); }
+        else if(sel==apiKeyRow){
+          if(promptAndSaveSteamGridDbKey("SteamGridDB API key",true)){
+            toast(steamGridDbKey().empty()?"SteamGridDB API key removed":"SteamGridDB API key updated");
+            SDL_Delay(900);
+          }
+          beginScreenFx();
+        }
         else if(sel==coversRow){ downloadAllCovers(); beginScreenFx(); }
         else {
           const Opt &option=S_launcher[sel];
@@ -3023,7 +3126,11 @@ static void launcherSettingsScreen() {
     }
     for(int row=0;row<visible&&top+row<listCount;row++){
       int index=top+row,y=LIST_Y0+row*ROW_H+(ROW_H-fontHeight)/2; bool current=index==sel;
-      if(index==coversRow){
+      if(index==apiKeyRow){
+        drawText(g_font,labelX,y,"SteamGridDB API key",current?COL_VAL:COL_TXT);
+        drawTextR(g_font_sm,valX,y+(fontHeight-TTF_FontHeight(g_font_sm))/2,
+                  steamGridDbKey().empty()?"Not set":"Configured",current?COL_VAL:COL_DIM);
+      } else if(index==coversRow){
         drawText(g_font,labelX,y,"Download all covers",current?COL_VAL:COL_TXT);
         drawTextR(g_font_sm,valX,y+(fontHeight-TTF_FontHeight(g_font_sm))/2,"SteamGridDB",current?COL_VAL:COL_DIM);
       } else {
@@ -3041,7 +3148,7 @@ static void launcherSettingsScreen() {
     drawTextC(g_font,SW/2,buttonY+(buttonHeight-fontHeight)/2,"Check for Updates",updateSelected?COL_VAL:COL_TXT);
     const std::string updateStatus=launcherUpdateStatusText();
     drawTextC(g_font_sm,SW/2,buttonY+buttonHeight+8,updateStatus.c_str(),updateSelected?COL_VAL:COL_DIM);
-    drawTextC(g_font_sm,SW/2,SH-38,"Left / Right  Change       A  Choose       B  Back",COL_DIM);
+    drawSettingsFooter("Left / Right  Change       A  Choose       B  Back");
     drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
 }
@@ -3159,7 +3266,7 @@ static void gameSourcesScreen() {
         std::string label=index==0?"[ Add game folder ]":sources[index-1];
         drawText(g_font,82,y,ellipsizedText(g_font,label,SW-170).c_str(),current?COL_VAL:(index==0?COL_HI:COL_TXT));
       }
-      drawTextC(g_font_sm,SW/2,SH-38,"A  Select       B  Back",COL_DIM);
+      drawSettingsFooter("A  Select       B  Back");
       SDL_RenderPresent(g_ren); SDL_Delay(8);
     }
   }
@@ -3309,8 +3416,7 @@ static bool installedContentScreen(uint64_t baseTitleFilter = 0) {
         const std::string size = installedSizeText(component.sizeBytes);
         drawTextR(g_font_sm, SW - 74, y + 22, size.c_str(), current ? COL_VAL : COL_DIM);
       }
-      drawTextC(g_font_sm, SW / 2, SH - 38,
-                count ? "A  Details / delete       B  Back" : "B  Back", COL_DIM);
+      drawSettingsFooter(count ? "A  Details / delete       B  Back" : "B  Back");
       drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
     }
   }
@@ -3380,7 +3486,7 @@ static void libraryStorageScreen() {
       drawText(g_font,labelX,y,labels[row],current?COL_VAL:COL_TXT);
       drawTextR(g_font_sm,valX,slot+(rowHeight-smallHeight)/2,values[row],current?COL_VAL:COL_DIM);
     }
-    drawTextC(g_font_sm,SW/2,SH-38,"A  Open       B  Back",COL_DIM);
+    drawSettingsFooter("A  Open       B  Back");
     drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
 }
@@ -3631,7 +3737,7 @@ static void onlineSettingsScreen() {
     }
     drawTextC(g_font_sm, SW / 2, SH - 76,
               "Selecting a service does not create credentials or guarantee server access.", COL_DIM);
-    drawTextC(g_font_sm, SW / 2, SH - 38, "A  Change       B  Back", COL_DIM);
+    drawSettingsFooter("A  Change       B  Back");
     drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
 }
@@ -3993,7 +4099,7 @@ static void runUpdateScreen() {
       if(snapshot.state==LauncherUpdateState::UpdateAvailable) controls="A  Download       B  Back       Up / Down  Scroll";
       else if(snapshot.state==LauncherUpdateState::Error||snapshot.state==LauncherUpdateState::Cancelled) controls="A  Retry       B  Back";
       else if(snapshot.state==LauncherUpdateState::Installed) controls="A  Exit Cemu";
-      drawTextC(g_font_sm,SW/2,panelY+panelHeight-50,controls,COL_DIM);
+      drawSettingsFooter(controls,panelY+panelHeight-38);
     }
     drawFadeIn();
     SDL_RenderPresent(g_ren);
@@ -4116,20 +4222,16 @@ static int chooseCoverArtwork(const std::vector<GridDbArtwork> &artworks,const c
     if(loaded==sel&&preview){ SDL_Rect destination={imageX,imageY,previewWidth,previewHeight}; SDL_RenderCopy(g_ren,preview,nullptr,&destination); }
     else if(loaded==sel&&previewFailed) drawTextC(g_font_sm,imageX+previewWidth/2,imageY+previewHeight/2,"Preview unavailable",COL_DIM);
     border(imageX,imageY,previewWidth,previewHeight,2,loaded==sel?COL_SEL:COL_DIM);
-    drawTextC(g_font_sm,SW/2,SH-38,"A  Use artwork       B  Back",COL_DIM);
+    drawSettingsFooter("A  Use artwork       B  Back");
     drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
 }
 
 static void downloadCover(Game &g) {
-  std::string key = storeGet(g_global, "Wrapper/SteamGridDBKey", "");
+  std::string key=steamGridDbKey();
   if (key.empty()) {
-    char buf[128];
-    if (promptText("Enter your free SteamGridDB API key", "", buf, sizeof(buf))) {
-      key = buf;
-      storeSet(g_global, "Wrapper/SteamGridDBKey", buf);
-      storeSave(g_global, LAUNCHER_INI);
-    } else { toast("A SteamGridDB API key is required"); SDL_Delay(1200); return; }
+    if(promptAndSaveSteamGridDbKey("Enter your free SteamGridDB API key",false)) key=steamGridDbKey();
+    else { toast("A SteamGridDB API key is required"); SDL_Delay(1200); return; }
   }
   mkdir(COVERS_DIR, 0777);
   std::string query=g.title;
@@ -4138,6 +4240,11 @@ static void downloadCover(Game &g) {
     toast("Searching SteamGridDB...");
     std::vector<GridDbGameResult> matches;
     int searchResult=griddb_search_games(key,query,matches);
+    if(searchResult==GRIDDB_NO_KEY){
+      if(!promptAndSaveSteamGridDbKey("SteamGridDB API key rejected",false)) return;
+      key=steamGridDbKey();
+      continue;
+    }
     if(searchResult!=GRIDDB_OK&&searchResult!=GRIDDB_NOT_FOUND){
       modalMessage("Cover search failed",{gridDbErrorText(searchResult)});
       return;
@@ -4175,12 +4282,10 @@ static void downloadCover(Game &g) {
 }
 
 static void downloadAllCovers() {
-  std::string key = storeGet(g_global, "Wrapper/SteamGridDBKey", "");
+  std::string key=steamGridDbKey();
   if (key.empty()) {
-    char buf[128];
-    if (promptText("Enter your free SteamGridDB API key", "", buf, sizeof(buf))) {
-      key = buf; storeSet(g_global, "Wrapper/SteamGridDBKey", buf); storeSave(g_global, LAUNCHER_INI);
-    } else { toast("A SteamGridDB API key is required"); SDL_Delay(1200); return; }
+    if(promptAndSaveSteamGridDbKey("Enter your free SteamGridDB API key",false)) key=steamGridDbKey();
+    else { toast("A SteamGridDB API key is required"); SDL_Delay(1200); return; }
   }
   mkdir(COVERS_DIR, 0777);
   std::vector<int> pending;
@@ -4205,7 +4310,14 @@ static void downloadAllCovers() {
     char st[64]; snprintf(st,sizeof(st),"%d downloaded    %d failed",ok,fail);
     drawTextC(g_font_sm, SW/2, by+46, st, COL_DIM);
     SDL_RenderPresent(g_ren);
-    int rc = griddb_fetch_cover(key, g.title, coverPath(g));
+    int rc=GRIDDB_NO_KEY;
+    for(;;){
+      rc=griddb_fetch_cover(key,g.title,coverPath(g));
+      if(rc!=GRIDDB_NO_KEY) break;
+      if(!promptAndSaveSteamGridDbKey("SteamGridDB API key rejected",false)){ cancel=true; break; }
+      key=steamGridDbKey();
+    }
+    if(cancel) break;
     if(rc==GRIDDB_OK){ ok++; reloadCover(g); } else fail++;
     done++;
   }
@@ -4548,7 +4660,7 @@ static bool pickIcon(Game &g, char *outPath, size_t outSize) {
   std::vector<std::string> paths; struct stat st;
   if(!g.iconPath.empty() && stat(g.iconPath.c_str(),&st)==0) paths.push_back(g.iconPath);
   { std::string cp=existingCoverPath(g); if(stat(cp.c_str(),&st)==0) paths.push_back(cp); }
-  std::string key = storeGet(g_global,"Wrapper/SteamGridDBKey","");
+  std::string key=steamGridDbKey();
   if(!key.empty()){
     clearUiBackground();
     drawHeader("Choose an icon", g.title.c_str());
@@ -4883,7 +4995,8 @@ static int perGameMenu(Game &g) {
     fillRect(mx,(int)g_hy,5,menuHeight,COL_SEL);
     for(int i=0;i<n;i++){ int slot=menuY+i*menuStep-5; int y=slot+(menuHeight-TTF_FontHeight(g_font))/2; bool cur=i==sel;
       SDL_Color rc = (i==n-1) ? (SDL_Color){228,120,120,255} : i==2&&!graphicPacksDownloaded ? COL_HI : COL_TXT;
-      const char *label=i==2&&!graphicPacksDownloaded?"Download graphics packs":items[i];
+      const char *label=i==2&&!graphicPacksDownloaded?"Download graphics packs":
+                        i==4&&regularFileExists(coverPath(g))?"Change cover (SteamGridDB)":items[i];
       drawText(g_font,cx+cw+94,y,label,cur?COL_VAL:rc);
     }
     drawFadeIn();
