@@ -211,7 +211,7 @@ static const char *iniGet(const char *key, const char *def) {
 }
 static void iniSet(const char *key, const char *val) { storeSet(*g_active, key, val); }
 
-enum OType { OT_CHOICE, OT_RANGE, OT_ACTION };
+enum OType { OT_CHOICE, OT_RANGE, OT_ACTION, OT_STATUS };
 struct Choice { const char *label, *val; };
 struct Opt {
   const char *label;
@@ -224,6 +224,7 @@ struct Opt {
 #define O_CHOICE(l,k,c,d)      { l, k, OT_CHOICE, c, (int)(sizeof(c)/sizeof(*c)), 0,0,0, d }
 #define O_RANGE(l,k,lo,hi,s,d) { l, k, OT_RANGE,  nullptr,0, lo,hi,s, d }
 #define O_ACTION(l)            { l, nullptr, OT_ACTION, nullptr,0, 0,0,0, nullptr }
+#define O_STATUS(l)            { l, nullptr, OT_STATUS, nullptr,0, 0,0,0, nullptr }
 
 static const Choice C_cpumode[]  = { {"Multi-core recompiler","3"}, {"Single-core recompiler","1"},
                                      {"Interpreter (slow)","0"} };
@@ -290,6 +291,7 @@ static const Opt S_framegen[] = {
   O_CHOICE("LSFG 2x (Vulkan)", "Wrapper/LSFGEnabled", C_bool, "false"),
   O_CHOICE("Flow resolution", "Wrapper/LSFGFlowScale", C_lsfgFlowScale, "0.25"),
   O_CHOICE("Performance mode", "Wrapper/LSFGPerformance", C_bool, "true"),
+  O_STATUS("Lossless.dll"),
 };
 static const Opt S_overlay[] = {
   O_CHOICE("FPS counter",      "OverlayFPS",         C_bool,  "false"),
@@ -328,6 +330,118 @@ static const Screen g_screens[SCR_COUNT] = {
   { "Controller / Input",S_input,    (int)(sizeof(S_input)/sizeof(Opt)) },
   { "USB Accessories",   S_accessories, (int)(sizeof(S_accessories)/sizeof(Opt)) },
 };
+
+struct SettingHelpEntry {
+  const char *key;
+  const char *kind;
+  const char *text;
+};
+
+/* Keep the SDL launcher descriptions beside the options they document.  This
+ * gives global and per-game settings the same contextual help without adding
+ * settings belonging to another emulator. */
+static const SettingHelpEntry SETTING_HELP[] = {
+  {"cpuMode", "CPU emulation",
+   "Selects how Cemu executes the Wii U CPU. The multi-core recompiler is fastest on Switch. Use single-core only for compatibility testing; the interpreter is extremely slow and intended for debugging."},
+  {"TimerShiftFactor", "Game timing / compatibility",
+   "Changes the speed of the emulated CPU timer without increasing the Switch CPU clock. Some game-specific fixes need a different timer rate, but the normal 1x value is the safest default."},
+  {"H264HardwareDecode", "Video playback",
+   "Uses the Switch hardware video decoder for Wii U H.264 movies. Disable it only when troubleshooting broken or missing in-game video playback."},
+
+  {"VSync", "Presentation",
+   "Synchronizes completed frames to the display refresh to reduce tearing. It can add latency or expose performance drops when a game cannot maintain its target frame rate."},
+  {"TripleBuffer", "Presentation / performance",
+   "Keeps a third Vulkan swapchain image available while another frame is being displayed. This can make presentation steadier under load, at the cost of some memory and potentially more latency."},
+  {"AsyncCompile", "Shader compilation",
+   "Compiles Vulkan shaders asynchronously to reduce long gameplay stalls. Newly encountered effects may be missing briefly while their shaders finish compiling."},
+  {"vkAccurateBarriers", "Graphics compatibility",
+   "Uses more accurate Vulkan synchronization between rendering operations. Keep it enabled for correct effects; disabling it may improve performance slightly but can cause game-specific rendering errors."},
+  {"UpscaleFilter", "Image scaling",
+   "Selects the filter used when the Wii U image is enlarged to the Switch display. Nearest is sharp and pixelated, while the other filters trade sharpness for smoother scaling."},
+  {"DownscaleFilter", "Image scaling",
+   "Selects the filter used when an image must be reduced. The choice changes sharpness and aliasing but does not change the game's internal rendering resolution."},
+  {"FullscreenScaling", "Display aspect ratio",
+   "Keep aspect ratio preserves the game's intended shape and may leave borders. Stretch fills the output but can distort the image."},
+  {"GamePadLayout", "Wii U GamePad display",
+   "Chooses whether to show the TV view, the GamePad view, or both views in a split layout. Composite layouts reduce the space available to each screen."},
+
+  {"TVVolume", "Audio output",
+   "Sets the volume of the emulated Wii U TV audio stream sent to the Switch output."},
+  {"PadAudio", "Wii U GamePad audio",
+   "Enables the separate audio stream that Wii U software sends to the GamePad. Disable it when duplicated TV and GamePad sound is unwanted."},
+  {"PadVolume", "Wii U GamePad audio",
+   "Sets the volume of the emulated GamePad audio stream when GamePad audio is enabled."},
+  {"AudioDelay", "Audio latency / stability",
+   "Controls Cemu's audio buffer target. Lower values reduce latency but can crackle when emulation is uneven; higher values are more stable but respond later."},
+
+  {"Wrapper/LSFGEnabled", "Frame generation",
+   "Generates one intermediate display frame for each real frame to target a smoother 2x presentation. It does not increase emulation speed and may add artifacts or latency. Vulkan only."},
+  {"Wrapper/LSFGFlowScale", "Frame generation quality",
+   "Sets the resolution used for optical-flow analysis. Half resolution can retain more motion detail but costs more GPU time and memory; Quarter is recommended on Switch."},
+  {"Wrapper/LSFGPerformance", "Frame generation performance",
+   "Uses LSFG's lighter performance-oriented processing path. Disable it only when you prefer image quality and have enough GPU headroom."},
+
+  {"OverlayFPS", "Performance display",
+   "Shows Cemu's frame-rate counter during gameplay."},
+  {"OverlayPosition", "Performance display",
+   "Chooses where Cemu's on-screen performance overlay is drawn. Disabled hides the overlay and its FPS counter."},
+  {"NotifShaderCompile", "Shader compilation",
+   "Shows a notification while Cemu is compiling shaders so brief stutter or temporarily missing effects can be identified."},
+
+  {"in_type", "Emulated controller",
+   "Selects the Wii U controller type presented to the game. Wii U GamePad is required by games that use its screen, microphone, or touch features."},
+  {"in_players", "Controller input",
+   "Sets how many active emulated controller slots Cemu creates for local multiplayer."},
+  {"in_rumble", "Controller feedback",
+   "Forwards supported Wii U controller vibration effects to the connected Switch controller."},
+  {"in_deadzone", "Analog input",
+   "Sets how far an analog stick must move before Cemu accepts input. Raise it to prevent drift; lower it for quicker response."},
+
+  {"UsbSkylanders", "Emulated USB accessory",
+   "Enables Cemu's virtual Skylanders Portal for games that communicate with that USB accessory."},
+  {"UsbInfinity", "Emulated USB accessory",
+   "Enables Cemu's virtual Disney Infinity Base for games that communicate with that USB accessory."},
+  {"UsbDimensions", "Emulated USB accessory",
+   "Enables Cemu's virtual LEGO Dimensions Toy Pad for games that communicate with that USB accessory."},
+
+  {"console_language", "Wii U system language",
+   "Sets the language reported by the emulated Wii U console. Auto follows the Switch system language when Cemu supports it; games may need to be restarted after a change."},
+
+  {"Wrapper/Theme", "Launcher appearance",
+   "Changes the SDL launcher's background and visual theme. It does not affect gameplay rendering."},
+  {"Wrapper/GridColumns", "Library layout",
+   "Sets how many game covers are displayed across each library row. More columns make each cover smaller."},
+  {"Wrapper/GridRows", "Library layout",
+   "Sets how many rows of game covers are displayed on each library page. More rows make each cover smaller."},
+  {"Wrapper/ShowGameTitles", "Library layout",
+   "Shows or hides game names below their cover artwork in the launcher library."},
+  {"Wrapper/UiAnimations", "Launcher appearance",
+   "Enables launcher transitions, moving highlights, and animated theme effects."},
+  {"Wrapper/UiSounds", "Launcher audio",
+   "Enables navigation, confirmation, and back sound effects in the SDL launcher."},
+  {"Wrapper/CheckUpdatesAtBoot", "Launcher updates",
+   "Checks for a newer Cemu-nx release when the SDL launcher starts. The result appears in Launcher settings."},
+};
+
+struct SettingHelpInfo {
+  const char *kind;
+  std::string text;
+};
+
+static SettingHelpInfo settingHelpFor(const Opt &option) {
+  if(option.key){
+    for(const SettingHelpEntry &entry:SETTING_HELP)
+      if(!strcmp(entry.key,option.key)) return {entry.kind,entry.text};
+  }
+  if(option.type==OT_ACTION && option.label && !strcmp(option.label,"Control mapping"))
+    return {"Controller mapping",
+            "Opens the press-to-bind screen for every Wii U controller input. Select a control, then press the Switch button or trigger that should activate it."};
+  if(option.type==OT_STATUS)
+    return {"Required component",
+            "Shows whether the Lossless Scaling frame-generation library is installed. LSFG cannot be enabled until Lossless.dll is copied to sdmc:/switch/cemu/lsfg/."};
+  return {"Setting",
+          "Changes this launcher or emulator option. Keep the default value when troubleshooting an unexpected game-specific problem."};
+}
 
 static void detectSystemLanguage() {
   if(R_FAILED(setInitialize())) return;
@@ -992,7 +1106,7 @@ static SDL_Texture *makeFlagTex(int region,int W,int H){
 static void makeFlags(){ g_flag[1]=makeFlagTex(1,36,24); g_flag[2]=makeFlagTex(2,36,24); g_flag[3]=makeFlagTex(3,36,24); }
 
 static SDL_Texture *g_gA=nullptr,*g_gB=nullptr,*g_gX=nullptr,*g_gY=nullptr,
-                   *g_gPlus=nullptr,*g_gL=nullptr,*g_gR=nullptr;
+                   *g_gPlus=nullptr,*g_gMinus=nullptr,*g_gL=nullptr,*g_gR=nullptr;
 // Supersampling keeps the downscaled glyphs crisp.
 static const int GLYPH_SS = 3;
 static SDL_Texture *makeGlyph(const char *label, bool pill){
@@ -1029,7 +1143,8 @@ static SDL_Texture *makeGlyph(const char *label, bool pill){
 static void makeGlyphs(){
   g_gA=makeGlyph("A",false); g_gB=makeGlyph("B",false);
   g_gX=makeGlyph("X",false); g_gY=makeGlyph("Y",false);
-  g_gPlus=makeGlyph("+",false); g_gL=makeGlyph("L",true); g_gR=makeGlyph("R",true);
+  g_gPlus=makeGlyph("+",true); g_gMinus=makeGlyph("-",true);
+  g_gL=makeGlyph("L",true); g_gR=makeGlyph("R",true);
 }
 
 enum FootAct { FA_NONE, FA_LAUNCH, FA_SORT, FA_OPTIONS, FA_SETTINGS, FA_PAGEL, FA_PAGER, FA_QUIT };
@@ -1065,6 +1180,7 @@ static SDL_Texture *glyphForButton(const char *button){
   if(strcmp(button,"X")==0) return g_gX;
   if(strcmp(button,"Y")==0) return g_gY;
   if(strcmp(button,"+")==0) return g_gPlus;
+  if(strcmp(button,"-")==0) return g_gMinus;
   if(strcmp(button,"L")==0) return g_gL;
   if(strcmp(button,"R")==0) return g_gR;
   return nullptr;
@@ -1080,6 +1196,13 @@ static void buttonHintSize(const char *button,int &width,int &height){
     width=textW(g_font_sm,button?button:"")+14;
     height=TTF_FontHeight(g_font_sm)+6;
   }
+}
+
+static int buttonHintWidth(const char *button,const char *label){
+  int width=0,height=0;
+  buttonHintSize(button,width,height);
+  if(label&&label[0]) width+=8+textW(g_font_sm,label);
+  return width;
 }
 
 static int drawButtonHint(int x,int cy,const char *button,const char *label){
@@ -1239,7 +1362,25 @@ static bool beginUiFrame() {
     g_exitRequested = true;
     return false;
   }
+  if(g_pad&&!SDL_GameControllerGetAttached(g_pad)) closeController();
   return true;
+}
+
+static int keyboardNavigationButton(SDL_Keycode key) {
+  switch(key){
+    case SDLK_RETURN: case SDLK_KP_ENTER: return BTN_CONFIRM;
+    case SDLK_ESCAPE: return BTN_CANCEL;
+    case SDLK_UP: return SDL_CONTROLLER_BUTTON_DPAD_UP;
+    case SDLK_DOWN: return SDL_CONTROLLER_BUTTON_DPAD_DOWN;
+    case SDLK_LEFT: return SDL_CONTROLLER_BUTTON_DPAD_LEFT;
+    case SDLK_RIGHT: return SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
+    case SDLK_PAGEUP: return SDL_CONTROLLER_BUTTON_LEFTSHOULDER;
+    case SDLK_PAGEDOWN: return SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
+    case SDLK_s: return SDL_CONTROLLER_BUTTON_X;
+    case SDLK_F1: return BTN_SETTINGS;
+    case SDLK_SPACE: return SDL_CONTROLLER_BUTTON_START;
+    default: return -1;
+  }
 }
 
 static bool pollUiEvent(SDL_Event &event) {
@@ -1259,6 +1400,15 @@ static bool pollUiEvent(SDL_Event &event) {
           closeController();
       }
       continue;
+    }
+    if(event.type==SDL_KEYDOWN){
+      const int button=keyboardNavigationButton(event.key.keysym.sym);
+      if(button>=0){
+        SDL_Event press{};
+        press.type=SDL_CONTROLLERBUTTONDOWN;
+        press.cbutton.button=(Uint8)button;
+        SDL_PushEvent(&press);
+      }
     }
     if (event.type == SDL_CONTROLLERBUTTONDOWN) {
       switch (event.cbutton.button) {
@@ -2608,11 +2758,20 @@ static void optValue(const Opt &o, char *out, int n) {
     else if(o.key&&!strcmp(o.key,"in_deadzone")) snprintf(out,n,"%s%%",iniGet(o.key,o.def));
     else snprintf(out,n,"%s", iniGet(o.key,o.def));
   }
-  else if (o.type==OT_ACTION) snprintf(out,n,"Press A");
+  else if (o.type==OT_ACTION) snprintf(out,n,">");
+  else if (o.type==OT_STATUS) snprintf(out,n,"%s",regularFileExists(LSFG_DLL_FILE)?"Installed":"Missing");
 }
 static void optAdjust(const Opt &o, int dir) {
   if (o.type==OT_CHOICE){ int i=choiceIdx(o); if(i<0)i=0; i=(i+dir+o.nch)%o.nch; iniSet(o.key,o.ch[i].val); }
   else if (o.type==OT_RANGE){ int v=atoi(iniGet(o.key,o.def))+dir*o.step; if(v<o.lo)v=o.lo; if(v>o.hi)v=o.hi; char b[24]; snprintf(b,sizeof(b),"%d",v); iniSet(o.key,b); }
+}
+
+static bool optionEnabled(int screen,const Opt &option) {
+  if(option.type==OT_STATUS) return false;
+  if(screen==SCR_FRAMEGEN&&option.key&&
+     (!strcmp(option.key,"Wrapper/LSFGFlowScale")||!strcmp(option.key,"Wrapper/LSFGPerformance")))
+    return !strcmp(iniGet("Wrapper/LSFGEnabled","false"),"true")&&regularFileExists(LSFG_DLL_FILE);
+  return true;
 }
 
 
@@ -2647,6 +2806,75 @@ static void listCol(int *colX,int *colW,int *labelX,int *valX){
 }
 static int listVis(){ int v=(SH-LIST_Y0-72)/ROW_H; return v<1?1:v; }
 
+static void showHelpCard(const char *section,const char *title,const char *kind,
+                         const std::string &description,const char *current,
+                         const char *scope) {
+  for(;;){
+    if(!beginUiFrame()) return;
+    SDL_Event event;
+    while(pollUiEvent(event)){
+      pumpStick(event);
+      int touchX=0,touchY=0;
+      if(touchFeed(event,&touchX,&touchY)==TOUCH_TAP) return;
+      if(event.type==SDL_CONTROLLERBUTTONDOWN &&
+         (event.cbutton.button==BTN_CONFIRM ||
+          event.cbutton.button==BTN_CANCEL ||
+          event.cbutton.button==BTN_SETTINGS)) return;
+    }
+
+    clearUiBackground();
+    const int panelWidth=std::min(SW-120,1000);
+    const int panelHeight=std::min(SH-96,500);
+    const int panelX=(SW-panelWidth)/2,panelY=(SH-panelHeight)/2;
+    glassPanel(panelX,panelY,panelWidth,panelHeight);
+    border(panelX,panelY,panelWidth,panelHeight,3,COL_SEL);
+    drawText(g_font_sm,panelX+40,panelY+24,section&&*section?section:"Settings",COL_DIM);
+    const char *helpTitle=title&&*title?title:"Setting info";
+    drawText(g_font_big,panelX+40,panelY+58,
+             ellipsizedText(g_font_big,helpTitle,panelWidth-80).c_str(),COL_VAL);
+
+    std::string metadata=kind&&*kind?kind:"Setting";
+    if(scope&&*scope){ metadata+="  |  "; metadata+=scope; }
+    drawText(g_font_sm,panelX+40,panelY+114,
+             ellipsizedText(g_font_sm,metadata,panelWidth-80).c_str(),COL_SEL);
+    int bodyY=panelY+164;
+    if(current&&*current){
+      const char *prefix="Current: ";
+      drawText(g_font_sm,panelX+40,panelY+146,prefix,COL_DIM);
+      drawScrollTextL(g_font_sm,panelX+40+textW(g_font_sm,prefix),panelY+146,
+                      panelWidth-80-textW(g_font_sm,prefix),current,COL_TXT);
+      bodyY=panelY+198;
+    }
+    fillRect(panelX+40,bodyY-18,panelWidth-80,2,(SDL_Color){70,78,92,210});
+    drawWrapped(g_font,panelX+40,bodyY,panelWidth-80,32,7,description.c_str(),COL_TXT);
+    drawSettingsFooter("A  Close       B  Close       X  Close",panelY+panelHeight-48);
+    drawTextC(g_font_sm,SW/2,panelY+panelHeight-22,"Touch anywhere to close",COL_DIM);
+    SDL_RenderPresent(g_ren);
+    SDL_Delay(8);
+  }
+}
+
+static void showOptionHelp(const char *section,const Opt &option,const char *scope) {
+  SettingHelpInfo help=settingHelpFor(option);
+  char value[256]={};
+  const char *current=nullptr;
+  if(option.type!=OT_ACTION){ optValue(option,value,sizeof(value)); current=value; }
+  showHelpCard(section,option.label,help.kind,help.text,current,scope);
+}
+
+static const char *settingsScreenDescription(int screen) {
+  switch(screen){
+    case SCR_CPU: return "Controls Cemu's CPU execution mode, emulated timer rate, and hardware video decoding. Compatibility overrides should normally be applied per game.";
+    case SCR_GRAPHICS: return "Controls Vulkan presentation, shader compilation, synchronization, image scaling, and how the Wii U TV and GamePad screens are arranged.";
+    case SCR_FRAMEGEN: return "Configures Vulkan-only LSFG 2x frame generation. It creates intermediate display frames but does not make Wii U emulation run faster.";
+    case SCR_AUDIO: return "Controls the Wii U TV and GamePad audio streams, their volume, and the balance between output latency and stability.";
+    case SCR_OVERLAY: return "Controls Cemu's in-game FPS and shader-compilation status displays and where the performance overlay appears.";
+    case SCR_INPUT: return "Selects the emulated Wii U controller, local player count, rumble, stick dead zone, and press-to-bind controller mappings.";
+    case SCR_ACCESSORIES: return "Enables Cemu's virtual USB portals for supported Skylanders, Disney Infinity, and LEGO Dimensions games.";
+    default: return "Opens this group of Cemu settings.";
+  }
+}
+
 static void renderSettings(int scr,int sel,int top,const char *ctx){
   clearUiBackground();
   const Screen &S=g_screens[scr];
@@ -2661,8 +2889,11 @@ static void renderSettings(int scr,int sel,int top,const char *ctx){
   fillRect(colX,(int)g_hy,5,ROW_H-2,COL_SEL);
   for(int r=0;r<vis && top+r<S.n;r++){
     int i=top+r,y=LIST_Y0+r*ROW_H+(ROW_H-fh0)/2; bool cur=(i==sel);
-    SDL_Color lc = cur?COL_VAL:COL_TXT;
-    SDL_Color vc = cur?COL_VAL:COL_DIM;
+    const bool enabled=optionEnabled(scr,S.opts[i]);
+    SDL_Color lc = enabled?(cur?COL_VAL:COL_TXT):(SDL_Color){92,98,110,255};
+    SDL_Color vc = enabled?(cur?COL_VAL:COL_DIM):(SDL_Color){92,98,110,255};
+    if(S.opts[i].type==OT_STATUS)
+      vc=regularFileExists(LSFG_DLL_FILE)?(SDL_Color){120,220,120,255}:(SDL_Color){235,125,115,255};
     drawText(g_font,labelX,y,S.opts[i].label,lc);
     char v[96]; optValue(S.opts[i],v,sizeof(v));
     drawTextR(g_font,valX,y,v,vc);
@@ -2673,6 +2904,7 @@ static void renderSettings(int scr,int sel,int top,const char *ctx){
     int thH=trH*vis/S.n, denom=(S.n-vis>0?S.n-vis:1);
     fillRect(trX,trY+(trH-thH)*top/denom,4,thH,COL_SEL);
   }
+  drawSettingsFooter("Left / Right  Change       A  Choose       X  Info       B  Back");
   drawFadeIn();
   SDL_RenderPresent(g_ren);
 }
@@ -2717,6 +2949,7 @@ static int dropdown(const char *title, const char *const *labels, int n, int cur
     }
     if(n>vis){ int trH=vis*rowH,trX=px+pw-12,trY=ly; fillRect(trX,trY,4,trH,(SDL_Color){40,44,54,255});
       int thH=trH*vis/n,dn=(n-vis>0?n-vis:1); fillRect(trX,trY+(trH-thH)*top/dn,4,thH,COL_SEL); }
+    drawSettingsFooter("A  Select       B  Back");
     drawFadeIn();
     SDL_RenderPresent(g_ren);
     SDL_Delay(8);
@@ -2792,7 +3025,7 @@ static void renderMappingPrompt(const InputMapping &mapping,int index,bool relea
   const char *current=iniGet(mapping.key,mapping.def);
   std::string currentLine=std::string("Current: ")+mappingTokenLabel(current);
   drawTextC(g_font_sm,SW/2,panelY+238,status&&*status?status:currentLine.c_str(),status&&*status?COL_HI:COL_DIM);
-  drawTextC(g_font_sm,SW/2,SH-72,"Hold Plus to clear       Hold Minus to cancel",COL_DIM);
+  drawSettingsFooter("+  Hold to clear       -  Hold to cancel",SH-72);
   drawTextC(g_font_sm,SW/2,SH-38,"Touch left to clear       Touch right to cancel",COL_DIM);
   SDL_RenderPresent(g_ren);
 }
@@ -2946,6 +3179,7 @@ static void runSettings(int scr, const char *ctx) {
   if(top<0||top>=S.n) top=0;
   auto nav=[&](int dir){ sel=(sel+dir+S.n)%S.n; };
   auto adjust=[&](const Opt &option,int direction){
+    if(!optionEnabled(scr,option)) return;
     optAdjust(option,direction);
     if(scr==SCR_FRAMEGEN && option.key && !strcmp(option.key,"Wrapper/LSFGEnabled") &&
        !strcmp(iniGet(option.key,option.def),"true") && !regularFileExists(LSFG_DLL_FILE)){
@@ -2993,6 +3227,10 @@ static void runSettings(int scr, const char *ctx) {
           else adjust(o,1);
           break;
         }
+        case BTN_SETTINGS:
+          showOptionHelp(S.title,S.opts[sel],ctx&&*ctx?"Per-game setting":"Global setting");
+          beginScreenFx();
+          break;
         case BTN_CANCEL: return;
       }
       int vis=listVis(); if(sel<top) top=sel; if(sel>=top+vis) top=sel-vis+1; if(top<0)top=0;
@@ -3105,6 +3343,22 @@ static void launcherSettingsScreen() {
           else optAdjust(option,1);
           applyChange();
         }
+      } else if(event.cbutton.button==BTN_SETTINGS){
+        if(sel<optionCount)
+          showOptionHelp("Launcher",S_launcher[sel],"Launcher setting");
+        else if(sel==apiKeyRow)
+          showHelpCard("Launcher","SteamGridDB API key","Online artwork",
+                       "Stores the personal SteamGridDB API key used to search and download cover or HOME shortcut artwork. Leave it blank to remove the saved key.",
+                       steamGridDbKey().empty()?"Not set":"Configured","Launcher setting");
+        else if(sel==coversRow)
+          showHelpCard("Launcher","Download all covers","Library artwork",
+                       "Downloads missing cover artwork for the whole Cemu library from SteamGridDB. Existing local covers are kept.",
+                       nullptr,"Launcher action");
+        else
+          showHelpCard("Launcher","Check for Updates","Launcher updates",
+                       "Checks the latest published Cemu-nx release, displays its notes, verifies the downloaded NRO, and safely replaces this launcher.",
+                       launcherUpdateStatusText().c_str(),"Launcher action");
+        beginScreenFx();
       } else if(event.cbutton.button==BTN_CANCEL){ finish(); return; }
       if(sel<listCount){
         if(sel<top) top=sel;
@@ -3148,7 +3402,7 @@ static void launcherSettingsScreen() {
     drawTextC(g_font,SW/2,buttonY+(buttonHeight-fontHeight)/2,"Check for Updates",updateSelected?COL_VAL:COL_TXT);
     const std::string updateStatus=launcherUpdateStatusText();
     drawTextC(g_font_sm,SW/2,buttonY+buttonHeight+8,updateStatus.c_str(),updateSelected?COL_VAL:COL_DIM);
-    drawSettingsFooter("Left / Right  Change       A  Choose       B  Back");
+    drawSettingsFooter("Left / Right  Change       A  Choose       X  Info       B  Back");
     drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
 }
@@ -3743,11 +3997,18 @@ static void onlineSettingsScreen() {
 }
 
 static void runSettingsRoot(const char *ctx) {
-  static const int order[] = { SCR_FRAMEGEN, SCR_CPU, SCR_GRAPHICS, SCR_AUDIO, SCR_OVERLAY, SCR_INPUT, SCR_ACCESSORIES };
-  const int nscr=(int)(sizeof(order)/sizeof(*order));
   bool global = !(ctx && *ctx);
-  int launcherRow=0,libraryRow=1,onlineRow=2,screenStart=3,langRow=screenStart+nscr,gfxRow=langRow+1;
-  int n=nscr+(global?5:0),sel=0,top=0;
+  static const int globalOrder[] = { SCR_CPU, SCR_GRAPHICS, SCR_AUDIO, SCR_OVERLAY,
+                                     SCR_INPUT, SCR_ACCESSORIES };
+  static const int gameOrder[] = { SCR_FRAMEGEN, SCR_CPU, SCR_GRAPHICS, SCR_AUDIO,
+                                   SCR_OVERLAY, SCR_INPUT, SCR_ACCESSORIES };
+  const int *order=global?globalOrder:gameOrder;
+  const int nscr=global?(int)(sizeof(globalOrder)/sizeof(*globalOrder)):
+                        (int)(sizeof(gameOrder)/sizeof(*gameOrder));
+  const int launcherRow=0,libraryRow=1,onlineRow=2,framegenRow=3,screenStart=4;
+  const int langRow=screenStart+nscr,gfxRow=langRow+1;
+  const int n=global?gfxRow+1:nscr;
+  int sel=0,top=0;
   const int rowH=global?54:58,y0=92,sectionGap=34,vis=std::max(1,(SH-y0-42-sectionGap)/rowH);
   auto rowY=[&](int index){ return y0+(index-top)*rowH+(global&&index>=screenStart?sectionGap:0); };
   beginScreenFx();
@@ -3774,9 +4035,40 @@ static void runSettingsRoot(const char *ctx) {
           if(global && sel==launcherRow){ launcherSettingsScreen(); }
           else if(global && sel==libraryRow){ libraryStorageScreen(); }
           else if(global && sel==onlineRow){ onlineSettingsScreen(); }
+          else if(global && sel==framegenRow){ runSettings(SCR_FRAMEGEN,ctx); }
           else if(global && sel==langRow){ optChoosePopup(O_console_language); }
           else if(global && sel==gfxRow){ gfxPackScreen(0); }
           else runSettings(order[global?sel-screenStart:sel],ctx);
+          beginScreenFx();
+          break;
+        case BTN_SETTINGS:
+          if(global && sel==launcherRow)
+            showHelpCard("Settings","Launcher","Launcher appearance",
+                         "Changes the SDL launcher's theme, library grid, labels, animations, sounds, artwork service, and update behavior.",
+                         nullptr,"Settings category");
+          else if(global && sel==libraryRow)
+            showHelpCard("Settings","Library & storage","Game and file management",
+                         "Manages game folders, local or removable storage, installed Wii U content, files, and SMB network shares used by the launcher.",
+                         nullptr,"Settings category");
+          else if(global && sel==onlineRow)
+            showHelpCard("Settings","Online & accounts","Wii U network services",
+                         "Selects offline, Nintendo, Pretendo, or custom network services and imports the account files Cemu needs for online play.",
+                         nullptr,"Settings category");
+          else if(global && sel==framegenRow)
+            showHelpCard("Settings","Frame Generation","Display processing",
+                         settingsScreenDescription(SCR_FRAMEGEN),nullptr,"Settings category");
+          else if(global && sel==langRow)
+            showOptionHelp("Settings",O_console_language,"Global setting");
+          else if(global && sel==gfxRow)
+            showHelpCard("Settings","Graphics packs","Game fixes and enhancements",
+                         "Downloads and configures Cemu graphics packs. Packs can provide game-specific rendering fixes, resolution changes, performance workarounds, and optional visual enhancements.",
+                         nullptr,"Settings category");
+          else {
+            const int screen=order[global?sel-screenStart:sel];
+            showHelpCard(global?"Settings":"Game settings",g_screens[screen].title,
+                         "Settings category",settingsScreenDescription(screen),nullptr,
+                         global?"Global settings":"Per-game overrides");
+          }
           beginScreenFx();
           break;
         case BTN_CANCEL: return;
@@ -3787,12 +4079,19 @@ static void runSettingsRoot(const char *ctx) {
     clearUiBackground();
     drawHeader(global ? "Settings" : "Game settings", global?nullptr:ctx);
     int colX,colW,labelX,valX; listCol(&colX,&colW,&labelX,&valX);
-    int shown=std::min(vis,n);
     if(global){
-      glassPanel(colX-12,y0-10,colW+24,3*rowH+18);
-      glassPanel(colX-12,y0+3*rowH+sectionGap-10,colW+24,(shown-3)*rowH+18);
+      auto drawVisibleSection=[&](int begin,int end){
+        const int first=std::max(begin,top);
+        const int last=std::min(end,top+vis);
+        if(first>=last) return;
+        const int panelY=rowY(first)-10;
+        const int panelBottom=rowY(last-1)+rowH+8;
+        glassPanel(colX-12,panelY,colW+24,panelBottom-panelY);
+      };
+      drawVisibleSection(0,screenStart);
+      drawVisibleSection(screenStart,n);
     } else {
-      glassPanel(colX-12,y0-10,colW+24,shown*rowH+18);
+      glassPanel(colX-12,y0-10,colW+24,std::min(vis,n)*rowH+18);
     }
     int fh0=TTF_FontHeight(g_font);
     float ty=(float)(rowY(sel)+2);
@@ -3819,13 +4118,20 @@ static void runSettingsRoot(const char *ctx) {
       } else if(global && i==onlineRow){
         drawText(g_font,labelX,y,"Online & accounts",cur?COL_VAL:COL_TXT);
         drawTextR(g_font_sm,valX,slot+(rowH-TTF_FontHeight(g_font_sm))/2,"Offline / Nintendo / Pretendo",cur?COL_VAL:COL_DIM);
+      } else if(global && i==framegenRow){
+        drawText(g_font,labelX,y,"Frame Generation",cur?COL_VAL:COL_TXT);
+        drawTextR(g_font_sm,valX,slot+(rowH-TTF_FontHeight(g_font_sm))/2,"LSFG 2x / Vulkan",cur?COL_VAL:COL_DIM);
       } else {
         drawText(g_font,labelX,y,g_screens[order[global?i-screenStart:i]].title,cur?COL_VAL:COL_TXT);
         drawTextR(g_font,valX,y,">",cur?COL_VAL:COL_DIM);
       }
     }
-    if(n>vis){ int trackH=vis*rowH,trackX=colX+colW+16; fillRect(trackX,y0,4,trackH,(SDL_Color){40,44,54,255});
+    if(n>vis){
+      const bool spansSections=global&&top<screenStart&&top+vis>screenStart;
+      int trackH=vis*rowH+(spansSections?sectionGap:0),trackX=colX+colW+16;
+      fillRect(trackX,y0,4,trackH,(SDL_Color){40,44,54,255});
       int thumbH=std::max(16,trackH*vis/n),denom=std::max(1,n-vis); fillRect(trackX,y0+(trackH-thumbH)*top/denom,4,thumbH,COL_SEL); }
+    drawSettingsFooter("A  Open       X  Info       B  Back");
     drawFadeIn();
     SDL_RenderPresent(g_ren);
     SDL_Delay(8);
@@ -3835,14 +4141,45 @@ static void runSettingsRoot(const char *ctx) {
 static void toast(const char *msg) {
   for (int f = 0; f < 2; f++) {
     clearUiBackground();
-    int pw=820,ph=120,px=(SW-pw)/2,py=(SH-ph)/2;
+    int pw=std::min(820,SW-64),ph=120,px=(SW-pw)/2,py=(SH-ph)/2;
     glassPanel(px,py,pw,ph); border(px,py,pw,ph,2,COL_HI);
-    drawTextC(g_font,SW/2,py+46,msg,COL_TXT);
+    drawTextC(g_font,SW/2,py+46,ellipsizedText(g_font,msg,pw-48).c_str(),COL_TXT);
     SDL_RenderPresent(g_ren); SDL_Delay(10);
   }
 }
 
+static std::vector<std::string> wrapDialogLines(const std::vector<std::string> &lines,
+                                                int maxWidth) {
+  std::vector<std::string> wrapped;
+  for(const std::string &source:lines){
+    if(source.empty()){ wrapped.emplace_back(); continue; }
+    std::string line;
+    size_t cursor=0;
+    while(cursor<source.size()){
+      while(cursor<source.size()&&source[cursor]==' ') cursor++;
+      size_t end=source.find(' ',cursor);
+      std::string word=source.substr(cursor,end==std::string::npos?std::string::npos:end-cursor);
+      std::string candidate=line.empty()?word:line+" "+word;
+      if(!line.empty()&&textW(g_font,candidate.c_str())>maxWidth){
+        wrapped.push_back(std::move(line));
+        line=std::move(word);
+      } else line=std::move(candidate);
+      if(end==std::string::npos) break;
+      cursor=end+1;
+    }
+    if(!line.empty())
+      wrapped.push_back(textW(g_font,line.c_str())<=maxWidth?line:
+                        ellipsizedText(g_font,line,maxWidth));
+  }
+  return wrapped;
+}
+
 static void modalMessage(const char *title, const std::vector<std::string> &lines) {
+  const int pw=SW*3/4;
+  const std::vector<std::string> displayLines=wrapDialogLines(lines,pw-64);
+  const int lineHeight=40;
+  const int ph=std::min(SH-64,180+(int)displayLines.size()*lineHeight);
+  const int px=(SW-pw)/2,py=(SH-ph)/2;
   for (;;) {
     if (!beginUiFrame()) return;
     SDL_Event e;
@@ -3854,20 +4191,25 @@ static void modalMessage(const char *title, const std::vector<std::string> &line
           (e.cbutton.button == BTN_CONFIRM || e.cbutton.button == BTN_CANCEL)) return;
     }
     clearUiBackground();
-    int pw = SW*3/4, ph = 150 + (int)lines.size()*40, px = (SW-pw)/2, py = (SH-ph)/2;
     glassPanel(px,py,pw,ph);
     border(px,py,pw,ph,3,COL_SEL);
-    drawTextC(g_font_big, SW/2, py+34, title, COL_SEL);
+    drawTextC(g_font_big,SW/2,py+34,ellipsizedText(g_font_big,title,pw-48).c_str(),COL_SEL);
     int y = py+108;
-    for (auto &l : lines) { drawTextC(g_font, SW/2, y, l.c_str(), COL_TXT); y += 40; }
-    drawTextC(g_font_sm, SW/2, py+ph-42, "Press A to continue", COL_DIM);
+    for(const std::string &line:displayLines){
+      if(y+TTF_FontHeight(g_font)>=py+ph-54) break;
+      drawTextC(g_font,SW/2,y,line.c_str(),COL_TXT);
+      y+=lineHeight;
+    }
+    drawSettingsFooter("A  Continue",py+ph-30);
     SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
 }
 
 static bool confirmBox(const char *title, const std::vector<std::string> &lines) {
-  int pw=SW*3/4, ph=200+(int)lines.size()*40, px=(SW-pw)/2, py=(SH-ph)/2;
-  int bw=210, bh=56, bby=py+ph-bh-22, yesx=SW/2-bw-18, nox=SW/2+18;
+  int pw=SW*3/4;
+  const std::vector<std::string> displayLines=wrapDialogLines(lines,pw-64);
+  int ph=std::min(SH-64,220+(int)displayLines.size()*40),px=(SW-pw)/2,py=(SH-ph)/2;
+  int bw=std::min(210,(pw-54)/2),bh=56,bby=py+ph-bh-22,yesx=SW/2-bw-12,nox=SW/2+12;
   for(;;){
     if (!beginUiFrame()) return false;
     SDL_Event e;
@@ -3887,13 +4229,17 @@ static bool confirmBox(const char *title, const std::vector<std::string> &lines)
     clearUiBackground();
     glassPanel(px,py,pw,ph);
     border(px,py,pw,ph,3,(SDL_Color){210,70,70,255});
-    drawTextC(g_font_big,SW/2,py+34,title,(SDL_Color){235,120,120,255});
-    int y=py+112; for(auto&l:lines){ drawTextC(g_font,SW/2,y,l.c_str(),COL_TXT); y+=40; }
-    int fh=TTF_FontHeight(g_font);
+    drawTextC(g_font_big,SW/2,py+34,ellipsizedText(g_font_big,title,pw-48).c_str(),(SDL_Color){235,120,120,255});
+    int y=py+112;
+    for(const std::string &line:displayLines){
+      if(y+40>=bby-8) break;
+      drawTextC(g_font,SW/2,y,line.c_str(),COL_TXT);
+      y+=40;
+    }
     fillRect(yesx,bby,bw,bh,(SDL_Color){150,50,50,255}); border(yesx,bby,bw,bh,2,(SDL_Color){215,95,95,255});
-    drawTextC(g_font,yesx+bw/2,bby+(bh-fh)/2,"Yes  (A)",COL_TXT);
+    drawButtonHint(yesx+(bw-buttonHintWidth("A","Yes"))/2,bby+bh/2,"A","Yes");
     fillRect(nox,bby,bw,bh,(SDL_Color){48,54,64,255}); border(nox,bby,bw,bh,2,COL_DIM);
-    drawTextC(g_font,nox+bw/2,bby+(bh-fh)/2,"No  (B)",COL_TXT);
+    drawButtonHint(nox+(bw-buttonHintWidth("B","No"))/2,bby+bh/2,"B","No");
     SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
 }
@@ -4309,6 +4655,7 @@ static void downloadAllCovers() {
     fillRect(bx,by, total?bw*done/total:0, bh, COL_SEL);
     char st[64]; snprintf(st,sizeof(st),"%d downloaded    %d failed",ok,fail);
     drawTextC(g_font_sm, SW/2, by+46, st, COL_DIM);
+    drawSettingsFooter("B  Cancel");
     SDL_RenderPresent(g_ren);
     int rc=GRIDDB_NO_KEY;
     for(;;){
@@ -4425,7 +4772,7 @@ static void openPackPanel(const GfxPack &p, PackSel &s) {
   for (auto &c : cats) { auto &ref = choiceRef(c.category); if (ref.empty()) ref = gfxCatDefault(p, c); }
   int row = 0, top = 0, nrows = 1 + (int)cats.size();
   bool hasDesc = !p.description.empty();
-  int footerH = hasDesc ? 120 : 0;
+  int footerH = hasDesc ? 174 : 54;
   int vis = (SH - LIST_Y0 - 40 - footerH) / ROW_H; if (vis < 1) vis = 1;
   beginScreenFx();
   for (;;) {
@@ -4458,6 +4805,23 @@ static void openPackPanel(const GfxPack &p, PackSel &s) {
             beginScreenFx();
           }
           break;
+        case BTN_SETTINGS: {
+          if(row==0){
+            const std::string description=p.description.empty()?
+              "Enables or disables this graphics pack and all of its selected presets for the current game.":p.description;
+            showHelpCard(p.name.c_str(),"Enabled","Graphics pack",description,
+                         s.enabled?"On":"Off","Graphics pack option");
+          } else {
+            const GfxCat &category=cats[row-1];
+            const char *title=category.category.empty()?"Options":category.category.c_str();
+            const std::string description="Selects the "+std::string(title)+
+              " preset used by this graphics pack. The pack must be enabled for this choice to take effect.";
+            showHelpCard(p.name.c_str(),title,"Graphics pack preset",description,
+                         choiceRef(category.category).c_str(),"Graphics pack option");
+          }
+          beginScreenFx();
+          break;
+        }
         case BTN_CANCEL: return;
       }
       if (row < top) top = row;
@@ -4487,6 +4851,7 @@ static void openPackPanel(const GfxPack &p, PackSel &s) {
       int fy = SH - footerH + 6; fillRect(colX, fy - 12, colW, 2, (SDL_Color){40, 44, 54, 255});
       drawWrapped(g_font_sm, colX + 6, fy, colW - 12, TTF_FontHeight(g_font_sm) + 4, 3, p.description.c_str(), COL_DIM);
     }
+    drawSettingsFooter("A  Change       X  Info       B  Back");
     drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
 }
@@ -4536,7 +4901,7 @@ static void gfxPackScreen(uint64_t filterTitleId) {
   std::vector<std::string> games; buildGames(games);
   std::vector<GRow> rows; if (perGame) rows = gfxBuildGameRows(packs, "", true);
   int sel = 0, top = 0, gameSel = 0;
-  auto packVis = [&]() { int v = (SH - LIST_Y0 - 150) / ROW_H; return v < 1 ? 1 : v; };
+  auto packVis = [&]() { int v = (SH - LIST_Y0 - 188) / ROW_H; return v < 1 ? 1 : v; };
   auto rowGap = [&](int index) { return mode==0&&top==0&&index>0?16:0; };
   auto nextSelectable = [&](int from, int dir) { int n = (int)rows.size(); if (n == 0) return 0; int i = from;
     for (int k = 0; k < n; k++) { if (i >= 0 && i < n && !rows[i].header) return i; i = (i + dir + n) % n; } return from; };
@@ -4591,6 +4956,24 @@ static void gfxPackScreen(uint64_t filterTitleId) {
           if (p.presets.empty()) s.enabled = !s.enabled;
           else { openPackPanel(p, s); beginScreenFx(); }
         }
+      } else if (b == BTN_SETTINGS) {
+        if(mode==0){
+          if(sel==0)
+            showHelpCard("Graphics Packs","Download latest packs","Graphics pack update",
+                         "Downloads the latest community graphics-pack bundle. Existing enabled packs and selected presets are preserved when their names still match.",
+                         nullptr,"Graphics pack action");
+          else if(sel>0&&sel-1<(int)games.size())
+            showHelpCard("Graphics Packs",games[sel-1].c_str(),"Game graphics packs",
+                         "Opens every installed graphics pack that matches this game so fixes, enhancements, and presets can be configured.",
+                         nullptr,"Graphics pack category");
+        } else if(sel>=0&&sel<(int)rows.size()&&!rows[sel].header){
+          const GfxPack &pack=packs[rows[sel].packIndex];
+          const PackSel &selection=selByRel[pack.rulesRel];
+          showHelpCard("Graphics Packs",pack.name.c_str(),"Game fix or enhancement",
+                       pack.description.empty()?"Configures this graphics pack and its available presets for the selected game.":pack.description,
+                       packValue(pack,selection).c_str(),"Graphics pack");
+        }
+        beginScreenFx();
       }
       if (sel < top) top = sel;
       if (sel >= top + vis) top = sel - vis + 1;
@@ -4624,13 +5007,14 @@ static void gfxPackScreen(uint64_t filterTitleId) {
     }
     if (mode == 1 && sel >= 0 && sel < (int)rows.size() && !rows[sel].header) {
       const GfxPack &p = packs[rows[sel].packIndex];
-      if (!p.description.empty()) { int fy = SH - 128; fillRect(colX, fy - 10, colW, 2, (SDL_Color){40, 44, 54, 255});
+      if (!p.description.empty()) { int fy = SH - 176; fillRect(colX, fy - 10, colW, 2, (SDL_Color){40, 44, 54, 255});
         drawWrapped(g_font_sm, colX + 6, fy, colW - 12, TTF_FontHeight(g_font_sm) + 4, 4, p.description.c_str(), COL_DIM); }
     }
     if ((mode == 0 && games.empty()) || (mode == 1 && rows.empty()))
       drawTextC(g_font_sm, SW / 2, LIST_Y0 + ROW_H * 3, "No packs - use Download latest packs", COL_DIM);
     if (nrows > vis) { int trH = vis * ROW_H, trX = colX + colW + 16, trY = LIST_Y0 - 2; fillRect(trX, trY, 4, trH, (SDL_Color){40, 44, 54, 255});
       int thH = trH * vis / nrows, dn = (nrows - vis > 0 ? nrows - vis : 1); fillRect(trX, trY + (trH - thH) * top / dn, 4, thH, COL_SEL); }
+    drawSettingsFooter(mode==0?"A  Open       X  Info       B  Back":"A  Change       X  Info       B  Back");
     drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
 }
@@ -4672,7 +5056,7 @@ static bool pickIcon(Game &g, char *outPath, size_t outSize) {
   if(paths.empty()){ toast("No icon found - add a SteamGridDB key or download a cover first"); SDL_Delay(1800); return false; }
   int n=(int)paths.size();
   int cols=n<5?n:5; if(cols<1)cols=1;
-  int rows=(n+cols-1)/cols, gap=18, top=150, bot=40;
+  int rows=(n+cols-1)/cols, gap=18, top=150, bot=80;
   int cw=(SW-80-(cols-1)*gap)/cols, ch=(SH-top-bot-(rows-1)*gap)/rows;
   int cell=cw<ch?cw:ch; if(cell>200)cell=200; if(cell<90)cell=90;
   int x0=(SW-(cols*cell+(cols-1)*gap))/2, y0=top;
@@ -4710,6 +5094,7 @@ static bool pickIcon(Game &g, char *outPath, size_t outSize) {
       if(tex[i]){ SDL_Rect d{x,y,cell,cell}; SDL_RenderCopy(g_ren,tex[i],nullptr,&d); }
       else drawTextC(g_font_sm,x+cell/2,y+cell/2,"?",COL_DIM);
     }
+    drawSettingsFooter("A  Choose       B  Back");
     drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
   for(auto t:tex) if(t) SDL_DestroyTexture(t);
@@ -4800,6 +5185,7 @@ static void forwarderWizard(Game &g) {
       fillRect(rx-10,createY-6,rw+20,createH, cur?(SDL_Color){44,86,44,240}:(SDL_Color){30,46,32,200});
       if(cur) fillRect(rx-10,createY-6,5,createH,COL_SEL);
       drawTextC(g_font, rx+rw/2, createY+12, "Create shortcut", cur?COL_VAL:(SDL_Color){150,225,150,255}); }
+    drawSettingsFooter("A  Edit / choose       B  Back");
     drawFadeIn(); SDL_RenderPresent(g_ren); SDL_Delay(8);
   }
   if(iconTex) SDL_DestroyTexture(iconTex);
@@ -4869,8 +5255,10 @@ static void clearShaderCaches(const Game &g) {
 
 static int perGameMenu(Game &g) {
   const char *items[] = { "Launch", "Game settings", "Graphics packs", "Rename game", "Download cover (SteamGridDB)", "Create HOME shortcut", "Manage installed content", "Clear shader caches", "Clear game settings", "Delete game (remove from SD)" };
-  constexpr int menuY = 184, menuStep = 52, menuHeight = 46;
   int n=10, sel=0, touchTop=0;
+  const int menuY=184;
+  const int menuStep=std::max(42,std::min(52,(SH-menuY-64)/n));
+  const int menuHeight=std::min(46,menuStep-4);
   std::string gp = std::string(GAMECFG_DIR) + "/" + g.key + ".ini";
   const std::string downloadedPacksVersion=std::string(GRAPHICPACKS_DIR)+"/downloadedGraphicPacks/version.txt";
   bool graphicPacksDownloaded=regularFileExists(downloadedPacksVersion);
@@ -4999,6 +5387,7 @@ static int perGameMenu(Game &g) {
                         i==4&&regularFileExists(coverPath(g))?"Change cover (SteamGridDB)":items[i];
       drawText(g_font,cx+cw+94,y,label,cur?COL_VAL:rc);
     }
+    drawSettingsFooter("A  Select       B  Back");
     drawFadeIn();
     SDL_RenderPresent(g_ren);
     SDL_Delay(8);
@@ -5337,7 +5726,7 @@ static void cleanupLauncher() {
     if (g_flag[i]) SDL_DestroyTexture(g_flag[i]);
     g_flag[i] = nullptr;
   }
-  SDL_Texture **glyphs[] = { &g_gA, &g_gB, &g_gX, &g_gY, &g_gPlus, &g_gL, &g_gR };
+  SDL_Texture **glyphs[] = { &g_gA, &g_gB, &g_gX, &g_gY, &g_gPlus, &g_gMinus, &g_gL, &g_gR };
   for (SDL_Texture **glyph : glyphs) {
     if (*glyph) SDL_DestroyTexture(*glyph);
     *glyph = nullptr;
