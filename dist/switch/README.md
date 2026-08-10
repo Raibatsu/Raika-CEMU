@@ -5,7 +5,7 @@ Install the final `cemu.nro` as `sdmc:/switch/cemu/cemu.nro`.
 
 ## Vulkan SDK
 
-Extract the complete Mesa 26.1.5 Switch Vulkan SDK into
+Extract the complete Mesa 26.2.0 Switch Vulkan SDK into
 `dependencies/switch_mesa_vulkan/`, then verify it with:
 
 ```sh
@@ -42,7 +42,7 @@ The SDL launcher checks the latest published release from
 Set `RELEASE_VERSION` to the GitHub tag when making a release:
 
 ```sh
-RELEASE_VERSION=1.1.1 BUILD_JOBS=18 ./build_switch_all.sh
+RELEASE_VERSION=1.1.2 BUILD_JOBS=18 ./build_switch_all.sh
 ```
 
 The updater requires GitHub's SHA-256 asset digest and validates both the

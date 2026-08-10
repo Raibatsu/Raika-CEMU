@@ -17,6 +17,7 @@ DEVKIT_PACKAGES=(
 	switch-curl
 	switch-ffmpeg
 	switch-dav1d
+	switch-libelf
 	switch-libdrm_nouveau
 	switch-mesa
 	switch-sdl2

@@ -4,7 +4,7 @@ set -euo pipefail
 export DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
-RELEASE_VERSION="${RELEASE_VERSION:-1.1.1}"
+RELEASE_VERSION="${RELEASE_VERSION:-1.1.2}"
 case "${BUILD_JOBS}" in
 	''|*[!0-9]*|0) echo "BUILD_JOBS must be a positive integer" >&2; exit 2 ;;
 esac

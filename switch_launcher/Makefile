@@ -21,7 +21,7 @@ ICON		:=	Cemu.jpg
 
 APP_TITLE	:=	Cemu
 APP_AUTHOR	:=	naga
-RELEASE_VERSION	?=	1.1.1
+RELEASE_VERSION	?=	1.1.2
 APP_VERSION	?=	$(RELEASE_VERSION)
 
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE

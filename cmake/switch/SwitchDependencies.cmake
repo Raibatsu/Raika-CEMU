@@ -181,6 +181,8 @@ target_include_directories(SwitchVulkanDriver INTERFACE
 	"${CMAKE_SOURCE_DIR}/dependencies/Vulkan-Headers/include")
 target_link_libraries(SwitchVulkanDriver INTERFACE
 	"${NVK_LOCAL}"
+	# Mesa 26.2 NVK parses cubin metadata through libelf.
+	"${SWITCH_PORTLIBS}/lib/libelf.a"
 	# The nouveau winsys provides NVHOST and NVMAP access.
 	"${SWITCH_PORTLIBS}/lib/libdrm_nouveau.a")
 
