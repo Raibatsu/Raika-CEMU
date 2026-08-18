@@ -1684,9 +1684,11 @@ bool PPCRecompiler_generateAArch64Code(struct PPCRecFunction_t* PPCRecFunction, 
 
 	// Jump patching changes Xbyak's cursor.
 	const size_t generatedCodeSize = aarch64GenContext.getSize();
-
 	if (!aarch64GenContext.processAllJumps())
+	{
+		cemuLog_log(LogType::Recompiler, "PPCRecompiler_generateAArch64Code(): some jumps exceeded the +/-128MB offset.");
 		return false;
+	}
 
 	aarch64GenContext.setSize(generatedCodeSize);
 
