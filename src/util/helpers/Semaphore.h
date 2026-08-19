@@ -112,6 +112,12 @@ public:
 			m_condition.wait(lock);
 	}
 
+	bool waitUntilNonZeroWithTimeout(uint32 ms)
+	{
+		std::unique_lock lock(m_mutex);
+		return m_condition.wait_for(lock, std::chrono::milliseconds(ms), [this] { return m_count != 0; });
+	}
+
 	bool isZero() const
 	{
 		return m_count == 0;

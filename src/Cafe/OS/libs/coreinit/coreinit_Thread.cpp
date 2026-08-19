@@ -1274,7 +1274,15 @@ namespace coreinit
 			{
 				__OSCheckSystemEvents();
 				if(g_isMulticoreMode == false)
+				{
 					coreIndex = (coreIndex + 1) % 3;
+				}
+#if defined(__SWITCH__)
+				else if (g_coreRunQueueThreadCount[coreIndex].isZero())
+				{
+					g_coreRunQueueThreadCount[coreIndex].waitUntilNonZeroWithTimeout(1);
+				}
+#endif
 			}
 			else
 			{
