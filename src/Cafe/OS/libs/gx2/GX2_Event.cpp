@@ -218,8 +218,10 @@ namespace GX2
 	{
 		// optional force full sync (texture readback and occlusion queries)
 		bool forceFullSync = false;
+#if !defined(__SWITCH__)
 		if (g_renderer && g_renderer->GetType() == RendererAPI::Vulkan)
 			forceFullSync = true;
+#endif
 		if (forceFullSync || ActiveSettings::WaitForGX2DrawDoneEnabled())
 		{
 			GX2ReserveCmdSpace(2);
